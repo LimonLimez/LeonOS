@@ -1,0 +1,38 @@
+{
+    "sprites":  {
+                    "info":  {
+                                 "centerArgb":  "0xFFF5F5F3",
+                                 "kernelColor":  "0xFFF5F5F3"
+                             },
+                    "chrome_close":  {
+                                         "centerArgb":  "0xFFFAF9F8",
+                                         "kernelColor":  "0xFFFAF9F8"
+                                     },
+                    "start":  {
+                                  "centerArgb":  "0xFFFFFFFE",
+                                  "kernelColor":  "0xFFFFFFFE"
+                              },
+                    "apps":  {
+                                 "centerArgb":  "0xFFF4F4F3",
+                                 "kernelColor":  "0xFFF4F4F3"
+                             },
+                    "chrome_min":  {
+                                       "centerArgb":  "0xFF2A3535",
+                                       "kernelColor":  "0xFF2A3535"
+                                   },
+                    "log":  {
+                                "centerArgb":  "0xFF057FE3",
+                                "kernelColor":  "0xFF057FE3"
+                            },
+                    "folder":  {
+                                   "centerArgb":  "0xFFFCE45E",
+                                   "kernelColor":  "0xFFFCE45E"
+                               },
+                    "chrome_max":  {
+                                       "centerArgb":  "0xFF33403E",
+                                       "kernelColor":  "0xFF33403E"
+                                   }
+                },
+    "source":  "assets/ui/leonos-desktop-spritesheet-transparent.png",
+    "manifest":  "assets/ui/spritesheet-manifest.json"
+}

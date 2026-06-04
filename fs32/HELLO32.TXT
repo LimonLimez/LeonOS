@@ -1,0 +1,5 @@
+Hello from the LeonOS FAT32 hard disk.
+
+This file lives on dist32/leonos32-hdd.img, a FAT32 volume read by the
+32-bit protected-mode kernel through its own ATA PIO driver. No BIOS is
+used after stage2 hands control to the kernel.

@@ -1,0 +1,8 @@
+FAT32 notes
+
+Controls match the floppy shell:
+- Keyboard: Up/Down select, Enter opens, Esc closes the viewer.
+- Mouse: move and left-click a file in the list to open it.
+
+When a FAT32 disk is present the file list and preview come from the
+hard disk instead of the FAT12 floppy.

@@ -1,0 +1,14 @@
+﻿{
+  "source": "assets/ui/leonos-desktop-spritesheet-transparent.png",
+  "alphaThreshold": 24,
+  "sprites": [
+    { "name": "chrome_min", "region": [0, 0, 120, 100], "width": 20, "height": 20 },
+    { "name": "chrome_max", "region": [60, 0, 120, 100], "width": 20, "height": 20 },
+    { "name": "chrome_close", "region": [120, 0, 130, 100], "width": 20, "height": 20 },
+    { "name": "start", "region": [60, 220, 110, 95], "width": 28, "height": 28 },
+    { "name": "folder", "region": [210, 360, 100, 85], "width": 24, "height": 24 },
+    { "name": "info", "region": [400, 360, 90, 95], "width": 24, "height": 24 },
+    { "name": "apps", "region": [500, 360, 110, 95], "width": 24, "height": 24 },
+    { "name": "log", "region": [640, 360, 90, 95], "width": 24, "height": 24 }
+  ]
+}

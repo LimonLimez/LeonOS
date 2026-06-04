@@ -1,0 +1,9 @@
+Controls
+
+Keyboard:
+Use Up and Down to select files. Press Enter to open. Press Esc to close the
+viewer.
+
+Mouse:
+Move the pointer and left-click a file in the list to open it.
+

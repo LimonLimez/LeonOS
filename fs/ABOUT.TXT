@@ -1,0 +1,9 @@
+LeonOS milestone 1
+
+This floppy uses a real FAT12 filesystem. The kernel reads the FAT and root
+directory from disk, lists user-visible files, and follows FAT cluster chains
+when opening a file.
+
+The GUI is intentionally small: VGA mode 13h, file list, viewer panel, keyboard
+navigation, and PS/2 mouse packet handling in QEMU.
+
