@@ -1,3 +1,5 @@
 dist/
 dist32/
 .tools/
+LeonOS/
+ports/netsurf/vendor/

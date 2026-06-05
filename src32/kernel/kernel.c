@@ -167,6 +167,18 @@ extern u8 __kernel_end;
 #define TSS_SEL 0x28u
 #define SYS_EXIT 0u
 #define SYS_WRITE 1u
+#define SYS_FB_INFO 2u
+#define SYS_FB_FILL 3u
+#define SYS_FB_PRESENT 4u
+#define SYS_EVENT_POLL 5u
+#define USER_APP_NONE 0u
+#define USER_APP_UHELLO 1u
+#define USER_APP_UGFX 2u
+#define USER_APP_UCDEMO 3u
+#define USER_APP_MAX_IMAGE_BYTES (1024u * 1024u)
+#define USER_STACK_PAGES 4u
+#define USER_VIRT_BASE 0x40000000u
+#define USER_VIRT_PDE (USER_VIRT_BASE >> 22)
 
 static struct IdtEntry idt[IDT_GATE_COUNT];
 static struct IdtPointer idt_pointer;
@@ -177,6 +189,7 @@ static u8 tss_kernel_stack[8192] __attribute__((aligned(16)));
 static u32 user_app_base;
 static u32 user_app_limit;
 static u32 user_stack_base;
+static u32 user_stack_limit;
 static volatile u8 pending_user_app;
 static volatile u8 pending_shell_app;
 static volatile u8 user_app_running;
@@ -185,6 +198,7 @@ static u32 kernel_heap_used;
 static u32 page_directory[1024] __attribute__((aligned(PAGE_SIZE)));
 static u32 low_page_tables[LOW_IDENTITY_TABLES][1024] __attribute__((aligned(PAGE_SIZE)));
 static u32 fb_page_tables[FB_IDENTITY_TABLES][1024] __attribute__((aligned(PAGE_SIZE)));
+static u32 user_page_table[1024] __attribute__((aligned(PAGE_SIZE)));
 static u32 fb_page_table_pdes[FB_IDENTITY_TABLES];
 static u32 pmm_bitmap[PMM_MAX_PAGES / 32u];
 static u32 pmm_total_pages;
@@ -257,8 +271,13 @@ static const char msg_user_stack_prefix[] = " stack=";
 static const char msg_user_copy_ok[] = "LeonOS user app image copied";
 static const char msg_user_pages_ok[] = "LeonOS user app pages user-accessible";
 static const char msg_user_pages_bad[] = "LeonOS user app page range bad";
-static const char msg_user_enter_prefix[] = "LeonOS user mode enter UHELLO.LEO base=";
+static const char msg_user_enter_prefix[] = "LeonOS user mode enter ";
+static const char msg_user_base_prefix[] = " base=";
 static const char msg_user_entry_prefix[] = " entry=";
+static const char msg_user_fb_info[] = "LeonOS user fb info ";
+static const char msg_user_fb_fill[] = "LeonOS user fb fill";
+static const char msg_user_fb_present[] = "LeonOS user fb present";
+static const char msg_user_event_poll[] = "LeonOS user event poll";
 static const char msg_cpu_exception[] = "CPU exception ";
 static const char msg_cpu_error[] = " error ";
 static const char msg_cpu_eip[] = " eip ";
@@ -1183,10 +1202,10 @@ static void fill_rect(u32 x, u32 y, u32 w, u32 h, u32 color)
     if (x >= g_boot->framebuffer.width || y >= g_boot->framebuffer.height) {
         return;
     }
-    if (x + w > g_boot->framebuffer.width) {
+    if (w > g_boot->framebuffer.width - x) {
         w = g_boot->framebuffer.width - x;
     }
-    if (y + h > g_boot->framebuffer.height) {
+    if (h > g_boot->framebuffer.height - y) {
         h = g_boot->framebuffer.height - y;
     }
 
@@ -1931,6 +1950,34 @@ static u8 fat32_find_file_raw(const char *name11, u32 *out_cluster, u32 *out_siz
     return 0;
 }
 
+static u32 fat32_read_file_bytes(u32 start_cluster, u32 file_size, u8 *dest, u32 max_bytes)
+{
+    u32 cluster = start_cluster;
+    u32 copied = 0;
+    u32 guard = 0;
+
+    while (cluster >= 2u && cluster < 0x0FFFFFF8u &&
+           copied < file_size && copied < max_bytes && guard < 65536u) {
+        guard += 1;
+        u32 base_lba = fat32_cluster_lba(cluster);
+        for (u32 s = 0; s < fat32_sectors_per_cluster &&
+             copied < file_size && copied < max_bytes; s += 1) {
+            if (!ata_read_sector(base_lba + s, fat32_data_buf)) {
+                return copied;
+            }
+            for (u32 i = 0; i < 512u && copied < file_size && copied < max_bytes; i += 1) {
+                dest[copied++] = fat32_data_buf[i];
+            }
+        }
+        if (copied >= file_size || copied >= max_bytes || cluster >= 0x0FFFFFF8u) {
+            break;
+        }
+        cluster = fat32_next_cluster(cluster);
+    }
+
+    return copied;
+}
+
 static const char fat32_write_name[11] = {
     'W', 'R', 'I', 'T', 'E', '3', '2', ' ', 'T', 'X', 'T'
 };
@@ -2120,17 +2167,56 @@ static const char leo_user_name[11] = {
     'U', 'H', 'E', 'L', 'L', 'O', ' ', ' ', 'L', 'E', 'O'
 };
 
+static const char leo_ugfx_name[11] = {
+    'U', 'G', 'F', 'X', ' ', ' ', ' ', ' ', 'L', 'E', 'O'
+};
+
+static const char leo_ucdemo_name[11] = {
+    'U', 'C', 'D', 'E', 'M', 'O', ' ', ' ', 'L', 'E', 'O'
+};
+
+static u8 user_fb_info_reported;
+static u8 user_fb_fill_reported;
+static u8 user_fb_present_reported;
+static u8 user_event_poll_reported;
+
+static u32 user_range_max(u32 user_ptr)
+{
+    if (user_app_base != 0u && user_ptr >= user_app_base &&
+        user_ptr < user_app_limit) {
+        return user_app_limit - user_ptr;
+    }
+    if (user_stack_base != 0u && user_ptr >= user_stack_base &&
+        user_ptr < user_stack_limit) {
+        return user_stack_limit - user_ptr;
+    }
+    return 0u;
+}
+
+static u8 user_range_valid(u32 user_ptr, u32 bytes)
+{
+    u32 max = user_range_max(user_ptr);
+    if (max == 0u || bytes == 0u) {
+        return 0u;
+    }
+    if (bytes <= max) {
+        return 1u;
+    }
+    return 0u;
+}
+
 /* Print a NUL-terminated string supplied by ring 3. The pointer is validated
- * to lie inside the loaded user image page and the scan is length-bounded so a
- * bad/unterminated string cannot walk off into kernel memory. */
+ * to lie inside the loaded user image/stack range and the scan is
+ * length-bounded so a bad/unterminated string cannot walk off into kernel
+ * memory. */
 static void user_syscall_write(u32 user_ptr)
 {
-    if (user_app_base == 0u || user_ptr < user_app_base || user_ptr >= user_app_limit) {
+    if (!user_range_valid(user_ptr, 1u)) {
         serial_print("LeonOS user syscall bad ptr\r\n");
         return;
     }
     const char *p = (const char *) user_ptr;
-    u32 max = user_app_limit - user_ptr;
+    u32 max = user_range_max(user_ptr);
     u32 ai = 0;
     for (u32 i = 0; i < max && p[i] != 0; i += 1) {
         char c = p[i];
@@ -2148,12 +2234,119 @@ static void user_syscall_write(u32 user_ptr)
     dirty = 1;
 }
 
+static u8 user_syscall_fb_info(u32 user_ptr)
+{
+    if (!user_range_valid(user_ptr, 16u)) {
+        serial_print("LeonOS user syscall bad ptr\r\n");
+        return 0u;
+    }
+
+    u32 *out = (u32 *) user_ptr;
+    out[0] = g_boot->framebuffer.width;
+    out[1] = g_boot->framebuffer.height;
+    out[2] = g_boot->framebuffer.pitch;
+    out[3] = 32u;
+
+    if (!user_fb_info_reported) {
+        user_fb_info_reported = 1u;
+        serial_print(msg_user_fb_info);
+        serial_print_dec(g_boot->framebuffer.width);
+        serial_write('x');
+        serial_print_dec(g_boot->framebuffer.height);
+        serial_write('\r');
+        serial_write('\n');
+    }
+    return 1u;
+}
+
+static u8 user_syscall_fb_fill(u32 x, u32 y, u32 w, u32 h, u32 color)
+{
+    if (g_boot->framebuffer.address == 0 || w == 0u || h == 0u) {
+        return 0u;
+    }
+
+    volatile u32 *old_pixels = draw_pixels_override;
+    u32 old_stride = draw_stride_override;
+    if (framebuffer_back_ready) {
+        draw_pixels_override = framebuffer_back;
+        draw_stride_override = framebuffer_back_stride;
+    }
+    fill_rect(x, y, w, h, color);
+    draw_pixels_override = old_pixels;
+    draw_stride_override = old_stride;
+    if (framebuffer_back_ready) {
+        framebuffer_present();
+    }
+
+    if (!user_fb_fill_reported) {
+        user_fb_fill_reported = 1u;
+        serial_print_line(msg_user_fb_fill);
+    }
+    return 1u;
+}
+
+static u8 user_syscall_fb_present(void)
+{
+    if (!framebuffer_back_ready) {
+        return 0u;
+    }
+    framebuffer_present();
+    if (!user_fb_present_reported) {
+        user_fb_present_reported = 1u;
+        serial_print_line(msg_user_fb_present);
+    }
+    return 1u;
+}
+
+static u8 user_syscall_event_poll(u32 user_ptr)
+{
+    if (!user_range_valid(user_ptr, 12u)) {
+        serial_print("LeonOS user syscall bad ptr\r\n");
+        return 0u;
+    }
+
+    struct KernelEvent event;
+    if (!event_pop(&event)) {
+        return 0u;
+    }
+
+    u32 *out = (u32 *) user_ptr;
+    out[0] = event.type;
+    out[1] = event.data0;
+    out[2] = event.data1;
+
+    if (!user_event_poll_reported) {
+        user_event_poll_reported = 1u;
+        serial_print_line(msg_user_event_poll);
+    }
+    return event.type;
+}
+
 /* C half of the int 0x80 gate. Runs in ring 0 on the TSS esp0 stack. */
 void syscall_dispatch(const struct InterruptFrame *frame)
 {
+    struct InterruptFrame *ret = (struct InterruptFrame *) frame;
     u32 number = frame->eax;
     if (number == SYS_WRITE) {
         user_syscall_write(frame->ebx);
+        ret->eax = 1u;
+        return;
+    }
+    if (number == SYS_FB_INFO) {
+        ret->eax = user_syscall_fb_info(frame->ebx);
+        return;
+    }
+    if (number == SYS_FB_FILL) {
+        ret->eax = user_syscall_fb_fill(frame->ebx, frame->ecx, frame->edx,
+                                        frame->esi, frame->edi);
+        return;
+    }
+    if (number == SYS_FB_PRESENT) {
+        ret->eax = user_syscall_fb_present();
+        return;
+    }
+    if (number == SYS_EVENT_POLL) {
+        ret->eax = user_syscall_event_poll(frame->ebx);
         return;
     }
     if (number == SYS_EXIT) {
@@ -2167,7 +2360,7 @@ void syscall_dispatch(const struct InterruptFrame *frame)
     serial_write('\n');
 }
 
-static void leo_run_user_app(void)
+static void leo_run_user_app(const char raw_name[11], const char *display_name)
 {
     if (!using_fat32) {
         serial_print("LeonOS user app skipped no FAT32\r\n");
@@ -2181,27 +2374,13 @@ static void leo_run_user_app(void)
     serial_print_line(msg_user_launch_begin);
     u32 cluster = 0;
     u32 size = 0;
-    char user_display[13];
-    user_display[0] = 'U';
-    user_display[1] = 'H';
-    user_display[2] = 'E';
-    user_display[3] = 'L';
-    user_display[4] = 'L';
-    user_display[5] = 'O';
-    user_display[6] = '.';
-    user_display[7] = 'L';
-    user_display[8] = 'E';
-    user_display[9] = 'O';
-    user_display[10] = 0;
-    user_display[11] = 0;
-    user_display[12] = 0;
-    if (!find_loaded_file(user_display, &cluster, &size) &&
-        !fat32_find_file_raw(leo_user_name, &cluster, &size)) {
+    if (!find_loaded_file(display_name, &cluster, &size) &&
+        !fat32_find_file_raw(raw_name, &cluster, &size)) {
         serial_print("LeonOS user app not found\r\n");
         return;
     }
     serial_print_line(msg_user_image_found);
-    if (size < 32u || size > 512u) {
+    if (size < 32u || size > USER_APP_MAX_IMAGE_BYTES) {
         serial_print("LeonOS user app bad size\r\n");
         return;
     }
@@ -2230,7 +2409,7 @@ static void leo_run_user_app(void)
         serial_print("LeonOS user app bad version\r\n");
         return;
     }
-    if (image_size < 32u || image_size > size || image_size > 512u) {
+    if (image_size < 32u || image_size > size || image_size > USER_APP_MAX_IMAGE_BYTES) {
         serial_print("LeonOS user app bad image size\r\n");
         return;
     }
@@ -2238,7 +2417,8 @@ static void leo_run_user_app(void)
         serial_print("LeonOS user app bad entry\r\n");
         return;
     }
-    if (image_size + bss_size > PAGE_SIZE) {
+    if (bss_size > USER_APP_MAX_IMAGE_BYTES || image_size + bss_size < image_size ||
+        image_size + bss_size > USER_APP_MAX_IMAGE_BYTES) {
         serial_print("LeonOS user app too large\r\n");
         return;
     }
@@ -2248,8 +2428,16 @@ static void leo_run_user_app(void)
     }
     serial_print_line(msg_user_validated);
 
-    u32 code = pmm_alloc_page();
-    u32 stack = pmm_alloc_page();
+    u32 image_total = image_size + bss_size;
+    u32 code_pages = align_up(image_total, PAGE_SIZE) / PAGE_SIZE;
+    u32 stack_pages = USER_STACK_PAGES;
+    if (code_pages == 0u || stack_pages == 0u) {
+        serial_print("LeonOS user app bad size\r\n");
+        return;
+    }
+
+    u32 code = pmm_alloc_contiguous_pages(code_pages);
+    u32 stack = pmm_alloc_contiguous_pages(stack_pages);
     serial_print(msg_user_alloc_prefix);
     serial_print_hex(code);
     serial_print(msg_user_stack_prefix);
@@ -2264,48 +2452,58 @@ static void leo_run_user_app(void)
     }
 
     u8 *dest = (u8 *) code;
-    for (u32 i = 0; i < image_size; i += 1) {
-        dest[i] = fat32_rb_buf[i];
+    u32 copied = fat32_read_file_bytes(cluster, size, dest, image_size);
+    if (copied != image_size) {
+        serial_print("LeonOS user app read failed\r\n");
+        for (u32 i = 0; i < code_pages; i += 1) { pmm_free_page(code + i * PAGE_SIZE); }
+        for (u32 i = 0; i < stack_pages; i += 1) { pmm_free_page(stack + i * PAGE_SIZE); }
+        return;
     }
-    for (u32 i = image_size; i < PAGE_SIZE; i += 1) {
+    for (u32 i = image_size; i < code_pages * PAGE_SIZE; i += 1) {
         dest[i] = 0;
     }
     u8 *stk = (u8 *) stack;
-    for (u32 i = 0; i < PAGE_SIZE; i += 1) {
+    for (u32 i = 0; i < stack_pages * PAGE_SIZE; i += 1) {
         stk[i] = 0;
     }
     serial_print_line(msg_user_copy_ok);
 
-    u32 code_pde = code >> 22;
-    u32 code_pte = (code >> 12) & 0x3FFu;
-    u32 stack_pde = stack >> 22;
-    u32 stack_pte = (stack >> 12) & 0x3FFu;
-    if (code_pde >= LOW_IDENTITY_TABLES || stack_pde >= LOW_IDENTITY_TABLES) {
+    u32 user_total_pages = code_pages + stack_pages;
+    if (user_total_pages > 1024u) {
         serial_print_line(msg_user_pages_bad);
-        pmm_free_page(code);
-        pmm_free_page(stack);
+        for (u32 i = 0; i < code_pages; i += 1) { pmm_free_page(code + i * PAGE_SIZE); }
+        for (u32 i = 0; i < stack_pages; i += 1) { pmm_free_page(stack + i * PAGE_SIZE); }
         return;
     }
 
-    page_directory[code_pde] |= 0x004u;
-    page_directory[stack_pde] |= 0x004u;
-    low_page_tables[code_pde][code_pte] |= 0x004u;
-    low_page_tables[stack_pde][stack_pte] |= 0x004u;
+    for (u32 i = 0; i < 1024u; i += 1) {
+        user_page_table[i] = 0u;
+    }
+    for (u32 i = 0; i < code_pages; i += 1) {
+        user_page_table[i] = (code + i * PAGE_SIZE) | 0x007u;
+    }
+    for (u32 i = 0; i < stack_pages; i += 1) {
+        user_page_table[code_pages + i] = (stack + i * PAGE_SIZE) | 0x007u;
+    }
+    page_directory[USER_VIRT_PDE] = ((u32) user_page_table) | 0x007u;
     u32 cr3;
     __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
     __asm__ volatile ("mov %0, %%cr3" : : "r"(cr3) : "memory");
     serial_print_line(msg_user_pages_ok);
 
-    user_app_base = code;
-    user_app_limit = code + PAGE_SIZE;
-    user_stack_base = stack;
+    user_app_base = USER_VIRT_BASE;
+    user_app_limit = USER_VIRT_BASE + code_pages * PAGE_SIZE;
+    user_stack_base = user_app_limit;
+    user_stack_limit = user_stack_base + stack_pages * PAGE_SIZE;
     user_app_running = 1;
 
-    u32 entry_addr = code + entry_offset;
-    u32 user_esp = stack + PAGE_SIZE - 16u; /* leave a little headroom, 16-aligned */
+    u32 entry_addr = USER_VIRT_BASE + entry_offset;
+    u32 user_esp = user_stack_limit - 16u; /* leave a little headroom, 16-aligned */
 
     serial_print(msg_user_enter_prefix);
-    serial_print_hex(code);
+    serial_print(display_name);
+    serial_print(msg_user_base_prefix);
+    serial_print_hex(USER_VIRT_BASE);
     serial_print(msg_user_entry_prefix);
     serial_print_hex(entry_addr);
     serial_write('\r');
@@ -2316,15 +2514,18 @@ static void leo_run_user_app(void)
     /* Control returns here after the app's exit syscall (resume_to_kernel). */
     serial_print("LeonOS user app returned to kernel\r\n");
 
-    low_page_tables[code_pde][code_pte] &= ~0x004u;
-    low_page_tables[stack_pde][stack_pte] &= ~0x004u;
+    for (u32 i = 0; i < user_total_pages; i += 1) {
+        user_page_table[i] = 0u;
+    }
+    page_directory[USER_VIRT_PDE] = 0u;
     __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
     __asm__ volatile ("mov %0, %%cr3" : : "r"(cr3) : "memory");
-    pmm_free_page(code);
-    pmm_free_page(stack);
+    for (u32 i = 0; i < code_pages; i += 1) { pmm_free_page(code + i * PAGE_SIZE); }
+    for (u32 i = 0; i < stack_pages; i += 1) { pmm_free_page(stack + i * PAGE_SIZE); }
     user_app_base = 0;
     user_app_limit = 0;
     user_stack_base = 0;
+    user_stack_limit = 0;
     user_app_running = 0;
     dirty = 1;
 }
@@ -2385,7 +2586,9 @@ enum ShellSerialMsg {
     SHELL_MSG_APP_NET,
     SHELL_MSG_APP_HELLO,
     SHELL_MSG_APP_UHELLO,
-    SHELL_MSG_APP_WRITE
+    SHELL_MSG_APP_WRITE,
+    SHELL_MSG_APP_UGFX,
+    SHELL_MSG_APP_UCDEMO
 };
 
 #include "tls_crypto.inc.c"
@@ -10722,7 +10925,9 @@ static const char shell_serial_msgs[][40] LATE_RODATA = {
     "LeonOS shell app=net",
     "LeonOS shell app=hello",
     "LeonOS shell app=uhello",
-    "LeonOS shell app=write"
+    "LeonOS shell app=write",
+    "LeonOS shell app=ugfx",
+    "LeonOS shell app=ucdemo"
 };
 
 static void shell_serial_emit(enum ShellSerialMsg msg)
@@ -10907,7 +11112,11 @@ static void handle_keyboard(void)
     } else if (scancode == 0x16u) {
         /* 'U': request the ring-3 user app; launched from the main loop so we
          * never enter ring 3 from inside the keyboard IRQ handler. */
-        pending_user_app = 1;
+        pending_user_app = USER_APP_UHELLO;
+    } else if (scancode == 0x22u) {
+        pending_user_app = USER_APP_UGFX;
+    } else if (scancode == 0x2Eu) {
+        pending_user_app = USER_APP_UCDEMO;
     } else if (scancode == 0x01u) {
         file_loaded = 0;
         dirty = 1;
@@ -11148,9 +11357,16 @@ void kmain(const struct LeonBootInfo *boot_info)
     for (;;) {
         shell_run_pending_app_action();
         if (pending_user_app) {
+            u8 user_app = pending_user_app;
             pending_user_app = 0;
             serial_print_line(msg_user_queued);
-            leo_run_user_app();
+            if (user_app == USER_APP_UCDEMO) {
+                leo_run_user_app(leo_ucdemo_name, "UCDEMO.LEO");
+            } else if (user_app == USER_APP_UGFX) {
+                leo_run_user_app(leo_ugfx_name, "UGFX.LEO");
+            } else {
+                leo_run_user_app(leo_user_name, "UHELLO.LEO");
+            }
         }
         scheduler_run_once();
         wait_for_interrupt();

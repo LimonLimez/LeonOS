@@ -22,6 +22,9 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $Dist = if ([System.IO.Path]::IsPathRooted($OutDir)) { $OutDir } else { Join-Path $Root $OutDir }
 $FsRoot = Join-Path $Root "fs32"
+$Src32 = Join-Path $Root "src32"
+$Include = Join-Path $Src32 "include"
+$UserRoot = Join-Path $Src32 "user"
 
 New-Item -ItemType Directory -Path $Dist -Force | Out-Null
 
@@ -271,6 +274,128 @@ if ($UserBytes[4] -ne 0x02) {
     throw "UHELLO.LEO must declare LEO1 ABI version 2 (ring-3 user app)."
 }
 Add-FileToImage "UHELLO.LEO" $UserBytes 0x20
+
+# Assemble the first user-mode framebuffer syscall probe. UGFX.LEO intentionally
+# spans more than one page so the ring-3 loader exercises multi-page reads,
+# mapping, and cleanup.
+$UserGfxSrc = Join-Path $Root "src32\app\ugfx.asm"
+$UserGfxBin = Join-Path $Dist "UGFX.LEO"
+& $Nasm -f bin $UserGfxSrc -o $UserGfxBin
+if ($LASTEXITCODE -ne 0) {
+    throw "NASM failed while assembling src32\app\ugfx.asm."
+}
+$UserGfxBytes = [System.IO.File]::ReadAllBytes($UserGfxBin)
+if ($UserGfxBytes.Length -lt 32 -or
+    $UserGfxBytes[0] -ne 0x4C -or $UserGfxBytes[1] -ne 0x45 -or
+    $UserGfxBytes[2] -ne 0x4F -or $UserGfxBytes[3] -ne 0x31) {
+    throw "UGFX.LEO is missing the LEO1 header."
+}
+if ($UserGfxBytes[4] -ne 0x02) {
+    throw "UGFX.LEO must declare LEO1 ABI version 2 (ring-3 user app)."
+}
+if ($UserGfxBytes.Length -gt 1048576) {
+    throw "UGFX.LEO exceeds the current 1 MiB user-app loader limit."
+}
+Add-FileToImage "UGFX.LEO" $UserGfxBytes 0x20
+
+# Build a freestanding C ring-3 user app. This is the first real step toward
+# compiling an existing C browser frontend for LeonOS: C code enters through a
+# tiny LEO1 crt0 and calls only the implemented syscall ABI.
+$Toolchain = Get-LeonOsI386Toolchain
+$UserCrtObj = Join-Path $Dist "ucdemo-crt0.o"
+$UserCObj = Join-Path $Dist "ucdemo.o"
+$UserElf = Join-Path $Dist "UCDEMO.elf"
+$UserCBin = Join-Path $Dist "UCDEMO.LEO"
+& $Nasm -f elf32 (Join-Path $UserRoot "crt0.asm") -o $UserCrtObj
+if ($LASTEXITCODE -ne 0) {
+    throw "NASM failed while assembling src32\user\crt0.asm."
+}
+if ($Toolchain.Kind -eq "clang-lld") {
+    & $Toolchain.Cc `
+        "--target=i686-elf" `
+        "-std=c11" `
+        "-Os" `
+        "-ffreestanding" `
+        "-fno-builtin" `
+        "-fno-stack-protector" `
+        "-fno-jump-tables" `
+        "-fno-pic" `
+        "-fno-pie" `
+        "-mno-sse" `
+        "-mno-mmx" `
+        "-m32" `
+        "-nostdinc" `
+        "-Wall" `
+        "-Wextra" `
+        "-I$Include" `
+        "-c" (Join-Path $UserRoot "cdemo.c") `
+        "-o" $UserCObj
+    if ($LASTEXITCODE -ne 0) {
+        throw "clang failed while building src32\user\cdemo.c."
+    }
+    & $Toolchain.Ld `
+        "-m" "elf_i386" `
+        "-T" (Join-Path $UserRoot "leonos_user.ld") `
+        "-nostdlib" `
+        "-Map" (Join-Path $Dist "UCDEMO.link.map") `
+        "-o" $UserElf `
+        $UserCrtObj `
+        $UserCObj
+    if ($LASTEXITCODE -ne 0) {
+        throw "ld.lld failed while linking UCDEMO.elf."
+    }
+} elseif ($Toolchain.Kind -eq "i686-elf-gcc") {
+    & $Toolchain.Cc `
+        "-std=c11" `
+        "-Os" `
+        "-ffreestanding" `
+        "-fno-builtin" `
+        "-fno-stack-protector" `
+        "-fno-jump-tables" `
+        "-fno-pic" `
+        "-fno-pie" `
+        "-mno-sse" `
+        "-mno-mmx" `
+        "-m32" `
+        "-nostdinc" `
+        "-Wall" `
+        "-Wextra" `
+        "-I$Include" `
+        "-c" (Join-Path $UserRoot "cdemo.c") `
+        "-o" $UserCObj
+    if ($LASTEXITCODE -ne 0) {
+        throw "i686-elf-gcc failed while building src32\user\cdemo.c."
+    }
+    & $Toolchain.Ld `
+        "-T" (Join-Path $UserRoot "leonos_user.ld") `
+        "-nostdlib" `
+        "-Map" (Join-Path $Dist "UCDEMO.link.map") `
+        "-o" $UserElf `
+        $UserCrtObj `
+        $UserCObj
+    if ($LASTEXITCODE -ne 0) {
+        throw "i686-elf-ld failed while linking UCDEMO.elf."
+    }
+} else {
+    throw "Unsupported toolchain kind '$($Toolchain.Kind)' while building UCDEMO.LEO."
+}
+& $Toolchain.Objcopy "-O" "binary" $UserElf $UserCBin
+if ($LASTEXITCODE -ne 0) {
+    throw "objcopy failed while producing UCDEMO.LEO."
+}
+$UserCBytes = [System.IO.File]::ReadAllBytes($UserCBin)
+if ($UserCBytes.Length -lt 32 -or
+    $UserCBytes[0] -ne 0x4C -or $UserCBytes[1] -ne 0x45 -or
+    $UserCBytes[2] -ne 0x4F -or $UserCBytes[3] -ne 0x31) {
+    throw "UCDEMO.LEO is missing the LEO1 header."
+}
+if ($UserCBytes[4] -ne 0x02) {
+    throw "UCDEMO.LEO must declare LEO1 ABI version 2 (ring-3 user app)."
+}
+if ($UserCBytes.Length -gt 1048576) {
+    throw "UCDEMO.LEO exceeds the current 1 MiB user-app loader limit."
+}
+Add-FileToImage "UCDEMO.LEO" $UserCBytes 0x20
 
 # Write both FAT copies.
 for ($Copy = 0; $Copy -lt $NumFats; $Copy++) {

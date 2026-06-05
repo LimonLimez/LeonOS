@@ -28,12 +28,16 @@ typedef enum {
 #define SHELL_APP_HELLO 5u
 #define SHELL_APP_UHELLO 6u
 #define SHELL_APP_WRITE 7u
-#define SHELL_APP_COUNT 8u
+#define SHELL_APP_UGFX 8u
+#define SHELL_APP_UCDEMO 9u
+#define SHELL_APP_COUNT 10u
 
 #define SHELL_ACTION_NONE 0u
 #define SHELL_ACTION_HELLO 1u
 #define SHELL_ACTION_UHELLO 2u
 #define SHELL_ACTION_WRITE 3u
+#define SHELL_ACTION_UGFX 4u
+#define SHELL_ACTION_UCDEMO 5u
 #define SHELL_LOG_MAX 6u
 
 #define SHELL_WF_VISIBLE 1u
@@ -158,6 +162,10 @@ static const char app_name_uhello[] = "Run UHELLO";
 static const char app_desc_uhello[] = "Ring-3 syscall app";
 static const char app_name_write[] = "FAT32 Write";
 static const char app_desc_write[] = "Create WRITE32.TXT";
+static const char app_name_ugfx[] = "Run UGFX";
+static const char app_desc_ugfx[] = "Ring-3 framebuffer app";
+static const char app_name_ucdemo[] = "Run C Demo";
+static const char app_desc_ucdemo[] = "Freestanding C user app";
 
 static const struct ShellApp shell_apps[SHELL_APP_COUNT] = {
     { SHELL_APP_FILES, SHELL_WIN_FILES, SHELL_ACTION_NONE, UI_SPRITE_FOLDER,
@@ -176,6 +184,10 @@ static const struct ShellApp shell_apps[SHELL_APP_COUNT] = {
       app_name_uhello, app_desc_uhello },
     { SHELL_APP_WRITE, SHELL_WIN_NONE, SHELL_ACTION_WRITE, UI_SPRITE_LOG,
       app_name_write, app_desc_write },
+    { SHELL_APP_UGFX, SHELL_WIN_NONE, SHELL_ACTION_UGFX, UI_SPRITE_APPS,
+      app_name_ugfx, app_desc_ugfx },
+    { SHELL_APP_UCDEMO, SHELL_WIN_NONE, SHELL_ACTION_UCDEMO, UI_SPRITE_APPS,
+      app_name_ucdemo, app_desc_ucdemo },
 };
 
 static struct ShellWin shell_wins[SHELL_WIN_MAX];
@@ -2677,6 +2689,12 @@ static enum ShellSerialMsg shell_app_msg(u8 app_id)
     if (app_id == SHELL_APP_WRITE) {
         return SHELL_MSG_APP_WRITE;
     }
+    if (app_id == SHELL_APP_UGFX) {
+        return SHELL_MSG_APP_UGFX;
+    }
+    if (app_id == SHELL_APP_UCDEMO) {
+        return SHELL_MSG_APP_UCDEMO;
+    }
     return SHELL_MSG_APP_APPS;
 }
 
@@ -2781,8 +2799,15 @@ static u8 shell_launch_app(u8 app_id)
     if (app->win_type != SHELL_WIN_NONE) {
         return shell_restore_or_create_window(app->win_type) != 0xFFu;
     }
-    if (app->action == SHELL_ACTION_UHELLO) {
-        pending_user_app = 1u;
+    if (app->action == SHELL_ACTION_UHELLO ||
+        app->action == SHELL_ACTION_UGFX ||
+        app->action == SHELL_ACTION_UCDEMO) {
+        pending_user_app = USER_APP_UHELLO;
+        if (app->action == SHELL_ACTION_UGFX) {
+            pending_user_app = USER_APP_UGFX;
+        } else if (app->action == SHELL_ACTION_UCDEMO) {
+            pending_user_app = USER_APP_UCDEMO;
+        }
         shell_ui_pulse();
         dirty = 1;
         return 1u;
