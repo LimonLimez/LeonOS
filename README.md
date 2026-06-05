@@ -362,22 +362,26 @@ The syscall ABI is deliberately tiny:
 | `eax` | syscall | arguments |
 | --- | --- | --- |
 | `0` | `SYS_EXIT` | none; never returns to the app |
-| `1` | `SYS_WRITE` | `ebx` = pointer to a NUL-terminated string in the app image |
+| `1` | `SYS_WRITE` | `ebx` = pointer to a NUL-terminated string in the app image or stack |
 | `2` | `SYS_FB_INFO` | `ebx` = pointer to four `u32`s: width, height, pitch, bpp |
 | `3` | `SYS_FB_FILL` | `ebx` = x, `ecx` = y, `edx` = w, `esi` = h, `edi` = 32-bit RGB color |
 | `4` | `SYS_FB_PRESENT` | present the kernel-owned backbuffer to the visible framebuffer |
 | `5` | `SYS_EVENT_POLL` | `ebx` = pointer to three `u32`s: type, data0, data1 |
 
-`SYS_WRITE` validates that the pointer lies inside the loaded user image region
-and scans length-bounded, so a bad or unterminated pointer cannot walk into
-kernel memory. The kernel mirrors the text to serial and one GUI line.
+`SYS_WRITE` validates that the pointer lies inside the loaded user image or
+stack region and scans length-bounded, so a bad or unterminated pointer cannot
+walk into kernel memory. The kernel mirrors the text to serial and one GUI
+line.
 
 `UHELLO.LEO` is a `LEO1` **version 2** image (`src32\app\uhello.asm`). It is
 position-independent (a `call`/`pop` finds its own load base), prints via
 `SYS_WRITE`, then calls `SYS_EXIT`. `UGFX.LEO` (`src32\app\ugfx.asm`) uses the
 same ring-3 path, queries framebuffer info, draws through rectangle fill
-syscalls, presents the backbuffer, polls one event slot, then exits. Neither
-program references an in-kernel pointer.
+syscalls, presents the backbuffer, polls one event slot, then exits.
+`UCDEMO.LEO` (`src32\user\cdemo.c`) is built from freestanding C through the
+LEO1 crt0/linker path in `src32\user\`. It proves C globals/strings and stack
+syscall buffers work at the fixed user virtual base. None of these programs
+references an in-kernel pointer.
 
 Pressing `U` while the FAT32 disk is mounted makes the kernel:
 
@@ -385,19 +389,22 @@ Pressing `U` while the FAT32 disk is mounted makes the kernel:
 - allocate a contiguous user image region up to 1 MiB, read the whole FAT32
   file into it, zero its declared BSS/trailing pages, and allocate a 16 KiB
   user stack,
-- flip the `U/S` bit on those image and stack pages so ring 3 can touch them
-  (other pages stay supervisor-only),
+- map those physical pages into the fixed user virtual window at `0x40000000`
+  with user access while other pages stay supervisor-only,
 - `iret` into the entry point at ring 3 with interrupts enabled.
 
 Pressing `G`, or launching **Run UGFX** from Programs, runs the framebuffer
-syscall probe instead.
+syscall probe instead. Pressing `C`, or launching **Run C Demo** from Programs,
+runs the freestanding C user app.
 
 When the app calls `SYS_EXIT`, the kernel switches back to the saved kernel
-stack, frees both pages, clears their user bit, and continues. Verify it:
+stack, unmaps the user virtual window, frees the physical pages, and continues.
+Verify it:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\test32-hdd-userapp-qemu.ps1
 powershell -ExecutionPolicy Bypass -File .\tools\test32-hdd-usergfx-qemu.ps1
+powershell -ExecutionPolicy Bypass -File .\tools\test32-hdd-userc-qemu.ps1
 ```
 
 The test presses `U` and asserts the boundary serial lines, including
@@ -405,18 +412,19 @@ The test presses `U` and asserts the boundary serial lines, including
 `UHELLO ran via syscall`, `LeonOS user app exited`, and
 `LeonOS user app returned to kernel`. The graphics test asserts
 `UGFX framebuffer syscall app`, `LeonOS user fb info`, `LeonOS user fb fill`,
-and `LeonOS user fb present`. Both tests fail on any loader error, bad syscall
-pointer/number, `CPU exception`, or `PANIC`.
+and `LeonOS user fb present`. The C test asserts `UCDEMO C userland app` plus
+the framebuffer syscall lines. These tests fail on any loader error, bad
+syscall pointer/number, `CPU exception`, or `PANIC`.
 
 Limits of the user-mode path (all intentional in this milestone): fixed app
 names only, contiguous flat images up to 1 MiB, one fixed 16 KiB user stack,
 ring-3 execution of exactly one app at a time, a blocking cooperative call (not
 a scheduled process), and only the tiny syscall set above. There is **no**
-multitasking process table, no per-process address space (the app shares the
-kernel's identity-mapped page tables with only the `U/S` bit changed on its
-image and stack pages), no per-process file handles, no `fork`/`exec` or shell,
-no SMP, and no security hardening. The ring-0 `HELLOAPP.LEO` loader is
-unchanged and still runs via `A`.
+multitasking process table, no separate per-process page directory (the app
+uses the kernel page directory plus one temporary user virtual mapping), no
+per-process file handles, no `fork`/`exec` or shell, no SMP, and no security
+hardening. The ring-0 `HELLOAPP.LEO` loader is unchanged and still runs via
+`A`.
 
 ## 32-bit Browser
 
@@ -632,9 +640,10 @@ See `docs\REAL_OS_PLAN.md` for the milestone plan and bug policy.
   cooperative in-kernel task runner, read-only FAT12, read FAT32 plus the
   single-file FAT32 write path described above, a ring-0 cooperative LEO1
   flat-app loader for one fixed single-page app, and a ring-3 user-mode path
-  that runs fixed LEO1 v2 apps (`UHELLO.LEO` and `UGFX.LEO`) through an
-  `int 0x80` syscall gate (`SYS_EXIT`, `SYS_WRITE`, framebuffer info/fill/
-  present, and event poll). It also has a minimal QEMU-tested RTL8139
+  that runs fixed LEO1 v2 apps (`UHELLO.LEO`, `UGFX.LEO`, and `UCDEMO.LEO`)
+  through a fixed user virtual window and an `int 0x80` syscall gate
+  (`SYS_EXIT`, `SYS_WRITE`, framebuffer info/fill/present, and event poll).
+  It also has a minimal QEMU-tested RTL8139
   network/browser smoke path for ARP, ICMP, one UDP DNS A-record query for
   `www.google.com`, one TCP port-443 TLS 1.3 handshake, one encrypted HTTPS
   homepage GET, one decrypted Google `HTTP/1.1 200` status response, and a
@@ -644,8 +653,8 @@ See `docs\REAL_OS_PLAN.md` for the milestone plan and bug policy.
   a process model. It still has:
   - no multitasking and no process table (exactly one app runs at a time, as a
     blocking cooperative call from the kernel main loop);
-  - no per-process address space (the app shares the kernel's identity-mapped
-    page tables; only the `U/S` bit on its image and stack pages is changed);
+  - no separate per-process address space (the app shares the kernel page
+    directory with one temporary user virtual mapping);
   - no per-process file handles, no `fork`/`exec`, and no user shell;
   - no preemptive scheduling of user code, no signals, no SMP, no sockets,
     no general TLS/HTML/JavaScript/full browser, and no real security hardening;

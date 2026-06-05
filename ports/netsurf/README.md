@@ -10,13 +10,17 @@ Implemented in LeonOS:
 
 - ring-3 `LEO1` v2 user apps with `int 0x80`;
 - multi-page user app loading from FAT32 up to the current 1 MiB image cap;
+- a fixed `0x40000000` user virtual window so freestanding C globals,
+  strings, and stack syscall buffers work;
+- a tiny LEO1 crt0/linker path plus `UCDEMO.LEO`, a C user app verified in
+  QEMU;
 - framebuffer info/fill/present syscalls;
 - a minimal event-poll syscall;
 - `UGFX.LEO`, a user-mode graphics probe that exercises those syscalls in QEMU.
 
 Not implemented yet:
 
-- C runtime/libc for user apps;
+- libc for user apps;
 - heap allocation for user apps;
 - file descriptors and path APIs;
 - socket/TLS syscalls;
@@ -50,7 +54,8 @@ Official NetSurf source information:
 
 ## Port Milestones
 
-1. Build a tiny freestanding C user app against `leonos_frontend`.
+1. Build a tiny freestanding C user app against `leonos_frontend`. Done for
+   the syscall ABI with `UCDEMO.LEO`; NetSurf itself is not compiled yet.
 2. Add a user heap. Multi-page `LEO1` image loading is already present up to
    the current 1 MiB cap.
 3. Add file/sysclock/event-loop syscalls.

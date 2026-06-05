@@ -189,26 +189,31 @@ regression baseline until the protected-mode kernel can replace it.
     live in `src32\kernel\interrupts.asm`; `gdt_init` runs from `kmain`.
   - `int 0x80` is an IDT gate with DPL 3, routed through the existing
     `isr_common`/`isr_dispatch` path (vector `0x80`) to `syscall_dispatch`.
-  - Syscalls: `SYS_EXIT` (eax=0) and `SYS_WRITE` (eax=1, ebx=string pointer).
-    `SYS_WRITE` validates the pointer against the loaded user image page and
-    scans length-bounded before printing.
+  - Syscalls: `SYS_EXIT` (eax=0), `SYS_WRITE` (eax=1, ebx=string pointer),
+    framebuffer info/fill/present, and event poll. `SYS_WRITE` validates the
+    pointer against the loaded user image/stack virtual range and scans
+    length-bounded before printing.
   - `enter_user_mode` saves the kernel context and `iret`s to ring 3; the
     `SYS_EXIT` handler calls `resume_to_kernel`, which restores the saved kernel
     stack so the launch behaves like a blocking call that returns after exit.
   - `src32\app\uhello.asm` assembles to `UHELLO.LEO`, a `LEO1` *version 2*
-    position-independent image stored on the FAT32 volume. Pressing `U` loads
-    it into one code page and one stack page, flips the `U/S` bit on just those
-    two pages (`set_page_user`), and enters ring 3. The app prints via
-    `SYS_WRITE` and exits via `SYS_EXIT`; it never touches a kernel pointer.
+    position-independent image stored on the FAT32 volume. Pressing `U` maps it
+    into the fixed user virtual window at `0x40000000` and enters ring 3. The
+    app prints via `SYS_WRITE` and exits via `SYS_EXIT`; it never touches a
+    kernel pointer.
+  - `src32\app\ugfx.asm` assembles to `UGFX.LEO`, a multi-page framebuffer
+    syscall probe. `src32\user\cdemo.c` builds through the LEO1 C crt0/linker
+    path into `UCDEMO.LEO`, proving freestanding C globals/strings and stack
+    syscall buffers work in ring 3.
   - `tools\test32-hdd-userapp-qemu.ps1` boots the FAT32 disk, presses `U`, and
     asserts the boundary lines (`GDT/TSS ring3 ready`,
     `user mode enter UHELLO.LEO`, `UHELLO ran via syscall`, `user app exited`,
     `user app returned to kernel`), failing on any loader error, bad syscall
     pointer/number, `CPU exception`, or `PANIC`.
   - Still NOT implemented (intentional): multitasking / a process table (one app
-    runs at a time as a blocking cooperative call), per-process address spaces
-    (the app shares the kernel's identity-mapped page tables with only its two
-    pages marked user), per-process file handles, `fork`/`exec` or a user shell,
+    runs at a time as a blocking cooperative call), separate per-process address
+    spaces (the app shares the kernel page directory with one temporary user
+    virtual mapping), per-process file handles, `fork`/`exec` or a user shell,
     preemptive scheduling of user code, signals, SMP, user-space sockets, a
     user-space browser API, and security hardening. The ring-0 `HELLOAPP.LEO` loader/test from Milestone 6 is
     preserved unchanged.
