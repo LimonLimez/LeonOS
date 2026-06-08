@@ -3,3 +3,4 @@ dist32/
 .tools/
 LeonOS/
 ports/netsurf/vendor/
+ports/quickjs/vendor/

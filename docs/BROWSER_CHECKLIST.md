@@ -167,3 +167,49 @@ attributes and `javascript:` URLs are counted and disabled; `noscript`, SVG, can
 custom elements, templates, responsive image sets, and other unsupported page features are surfaced
 through counters, placeholders, and the info panel. This is not a real JavaScript runtime and does not
 support dynamic DOM, timers, XHR/fetch, storage, service workers, Web APIs, or JS-driven rendering.
+
+## 8. Ring-3 HTTPS Stream API
+
+- [x] Add a user-visible stream open/poll/read/meta/close ABI.
+- [x] Prove a real HTTPS response can be read in chunks by a ring-3 app.
+- [x] Keep stream close from leaking leftover TLS bytes into the kernel browser renderer.
+- [x] Move the NetSurf fetcher from the blocking `SYS_NET_FETCH` bridge onto the stream ABI.
+
+Verified on 2026-06-06 with `tools/test32-hdd-ustream-qemu.ps1`: `USTREAM.LEO`
+opened `https://www.google.com/`, received real DNS/TCP/TLS/HTTPS status 200,
+read the Google body through `SYS_NET_STREAM_READ` in 1 KiB chunks, copied real
+metadata with `SYS_NET_STREAM_META` (`text/html; charset=UTF-8`), closed the
+stream, and returned to the kernel. The regression rejects kernel-browser render
+telemetry after close so stream cleanup stays owned by the ring-3 app.
+
+Current stream scope is honest and limited: it is one active global HTTPS
+transaction on top of the existing tiny TLS path. It is not arbitrary TCP, not a
+BSD sockets API, not multi-host/concurrent networking, and not wired into
+NetSurf as a fully asynchronous multi-connection fetcher yet. The current
+NetSurf smoke fetcher uses the stream ABI statefully, streams body chunks into
+NetSurf callbacks, and serializes NetSurf fetch contexts onto the one active
+kernel HTTPS stream instead of dropping immediately when the stream is busy.
+
+Verified on 2026-06-07 with
+`tools/test32-hdd-netsurf-qemu.ps1 -TimeoutSeconds 520 -StartUrl "https://www.google.com/?igu=1&hl=en&gbv=1" -RequireSubresource`:
+`NETSURF.LEO` loaded through the FAT32 ring-3 loader, printed
+`LeonOS user app copy begin bytes=2264488`, entered user mode, started the real
+NetSurf monkey frontend/core, opened
+`https://www.google.com/?igu=1&hl=en&gbv=1`, resolved Google DNS,
+completed TCP/TLS/HTTPS with status 200, streamed real Google body bytes through
+`SYS_NET_STREAM_*`, forwarded `text/html; charset=UTF-8` metadata,
+fed an 80 KB-class real response body through NetSurf data callbacks without the
+old Google compatibility excerpt, fetched real Google image/CSS subresources,
+decoded and blitted the real Google logo, reached Hubbub parser states
+`BEFORE_HTML` and `IN_BODY`, emitted monkey redraw `PLOT` commands, quit cleanly,
+and returned to the kernel in noninteractive regression mode.
+
+Also verified on 2026-06-07 with
+`tools/test32-hdd-netsurf-interactive-qemu.ps1 -TimeoutSeconds 420 -StartUrl "https://www.google.com/?igu=1&hl=en&gbv=1" -TypedUrl "example.com"`:
+the resident NetSurf app rendered Google, accepted keyboard scroll input, focused
+the top URL bar, typed a custom URL, and navigated to `https://example.com/`.
+
+This build compiles Duktape plus generated NetSurf DOM JavaScript bindings, but
+JavaScript is disabled by default. Duktape still times out on or cannot parse
+Google's script bundles, so the current proven browser mode is real static
+HTML/CSS/images over HTTPS, not Chrome-class JavaScript site compatibility.

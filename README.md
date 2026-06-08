@@ -431,6 +431,36 @@ hardening. The ring-0 `HELLOAPP.LEO` loader is unchanged and still runs via
 The 32-bit QEMU path now has a small Browser window backed by a polled RTL8139
 network stack. With `-nic user,model=rtl8139`, LeonOS can:
 
+**Quick launch (FAT32 HDD boot, network enabled):**
+
+| Key / menu | App | What it does |
+| --- | --- | --- |
+| **F11** | kernel | Opens the in-kernel HTTPS browser window |
+| **B** | `UBROWSER.LEO` | Ring-3 launcher: queues a kernel browser session |
+| **N** | `UNETRUN.LEO` | NetSurf port harness: yield/heap, then opens browser |
+| **M** | `NETSURF.LEO` | Runs NetSurf's real monkey frontend/core as an interactive browser, opens `https://www.google.com/?igu=1&hl=en&gbv=1`, streams real HTTPS HTML/CSS/images through LeonOS, and redraws through NetSurf's plot path |
+| **X** | `UWEB.LEO` | Fetches `https://www.example.com/` into user memory, prints a text preview on serial, then opens the kernel browser |
+| **S** | `USTREAM.LEO` | Streams `https://www.google.com/` through the ring-3 HTTPS stream API, reads chunks, prints metadata, and closes cleanly |
+| Programs → **User Web** | `UWEB.LEO` | Same as **X** |
+
+Run with network:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\run32-hdd-qemu.ps1 -Mode Native1080p -Network
+```
+
+Automated checks:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\test32-hdd-ubrowser-qemu.ps1
+powershell -ExecutionPolicy Bypass -File .\tools\test32-hdd-unetsurf-qemu.ps1
+powershell -ExecutionPolicy Bypass -File .\tools\test32-hdd-netsurf-qemu.ps1
+powershell -ExecutionPolicy Bypass -File .\tools\test32-hdd-uweb-qemu.ps1
+powershell -ExecutionPolicy Bypass -File .\tools\test32-hdd-ustream-qemu.ps1
+```
+
+The 32-bit browser stack can:
+
 - detect and initialize the RTL8139 PCI NIC;
 - send and receive Ethernet frames through polled RX/TX rings;
 - resolve QEMU's gateway MAC with ARP;
@@ -487,6 +517,21 @@ network stack. With `-nic user,model=rtl8139`, LeonOS can:
   drawer for the current network response plus parsed HTML structure/resource
   counters;
 - wrap document text on word boundaries and draw a scroll thumb for long pages.
+- run the upstream NetSurf monkey frontend/core as `NETSURF.LEO`, route
+  NetSurf `https://` fetches through the LeonOS `SYS_NET_STREAM_*` API, pass
+  real HTTP status/content-type metadata through `SYS_NET_STREAM_META`, fetch
+  real Google homepage HTML plus image/CSS subresources, feed the real response
+  bodies into NetSurf callbacks, decode and blit the real Google logo, and keep
+  the browser resident for scrolling and typed HTTPS URLs. JavaScript is built
+  but disabled by default because Duktape cannot run Google's modern script
+  bundles reliably yet; this is an honest static HTML/CSS/image browser mode,
+  not a fake Chrome page.
+- expose a one-handle ring-3 HTTPS stream API (`SYS_NET_STREAM_OPEN`, `POLL`,
+  `READ`, `META`, `CLOSE`) and prove it with `USTREAM.LEO` reading the real
+  Google HTTPS body in 1 KiB chunks before closing cleanly. The NetSurf fetcher
+  now queues fetch contexts against that one stream instead of immediately
+  failing a resource request while the stream is busy, and the build can target
+  another HTTPS startup URL with `ports\netsurf\build-leonos-probe.ps1 -StartUrl`.
 
 Verify it:
 
@@ -499,11 +544,12 @@ powershell -ExecutionPolicy Bypass -File .\tools\capture-browser.ps1 -Resolution
 ```
 
 Still intentionally unsupported: DHCP, routing beyond the QEMU user-net smoke
-path, sockets, general-purpose TLS, certificate validation, CSS cascade/layout,
-computed styles, general JavaScript execution, DOM APIs, event loop/timers,
-remote PNG/JPEG/GIF/WebP image decoding, form submission/search input, reliable
-clicked-page replacement after navigation, queued-resource HTTPS GET completion,
-generalized or multi-host resource fetching, packet retransmission, multiple
+path, sockets, general-purpose TLS, certificate validation, full CSS
+cascade/layout, computed styles, Chrome-class JavaScript compatibility, complete
+DOM/Web APIs, event loop/timers, remote PNG/JPEG/GIF/WebP image decoding in the
+NetSurf target, reliable clicked-page replacement after navigation,
+queued-resource HTTPS GET completion, generalized or multi-host resource
+fetching, arbitrary socket reads/writes, packet retransmission, multiple
 simultaneous connections, and pixel-accurate web page rendering.
 LeonOS now renders a bounded structured preview from real text/tags extracted
 from Google HTTPS HTML, builds a bounded document tree, scans and applies a tiny
@@ -514,7 +560,14 @@ only tiny
 preview-level tag/attribute hints, and exposes real parsed
 tag/resource/style/script/DOM/layout counts plus a normalized resource queue and
 same-host HTTPS resource/navigation attempt phase/result; it is not a full
-browser engine yet.
+browser engine yet. The NetSurf bridge streams the real Google Search response
+body over HTTPS and renders through real NetSurf code. The current QEMU proof is
+still a smoke test: Duktape and generated DOM bindings compile and start, the
+fetcher reads via the one-handle LeonOS HTTPS stream API, queues later fetch
+contexts until the stream is free, forwards real status/content-type metadata,
+and feeds the real Google HTML body to NetSurf.
+It does not prove full Google JavaScript execution, external resource loading,
+or pixel-accurate layout.
 
 To become a real browser equivalent, LeonOS still needs a much larger stack:
 a general socket API, retransmission/timeouts, DHCP or configurable network
@@ -536,12 +589,15 @@ not vendored by default; use:
 powershell -ExecutionPolicy Bypass -File .\ports\netsurf\fetch-netsurf.ps1
 ```
 
-The first LeonOS-side prerequisite is now real: ring-3 user code can query the
-framebuffer, draw rectangles into the kernel-owned backbuffer, present it, and
-poll one event slot. That is still not a complete NetSurf port. The next
-required OS pieces are a freestanding C runtime, larger user executables, a
-user heap, file/sysclock APIs, and a socket/TLS API that the browser can call
-without living inside the kernel.
+The first LeonOS-side prerequisites are now real: ring-3 user code can query the
+framebuffer, draw rectangles into the kernel-owned backbuffer, present it, poll
+one event slot, allocate from a user heap, call a blocking HTTPS fetch syscall,
+and use one active HTTPS stream handle with chunked reads. NetSurf's fetcher now
+uses that stream handle, renders into the LeonOS framebuffer, accepts basic
+keyboard/mouse events, and keeps a resident browser window alive. That is still
+not a complete NetSurf port: the next required OS pieces are polished native
+browser chrome, real file/sysclock/POSIX behavior, and a generalized socket/TLS
+API instead of one global HTTPS stream.
 
 ## Test In QEMU
 
@@ -643,11 +699,15 @@ See `docs\REAL_OS_PLAN.md` for the milestone plan and bug policy.
   that runs fixed LEO1 v2 apps (`UHELLO.LEO`, `UGFX.LEO`, and `UCDEMO.LEO`)
   through a fixed user virtual window and an `int 0x80` syscall gate
   (`SYS_EXIT`, `SYS_WRITE`, framebuffer info/fill/present, and event poll).
-  It also has a minimal QEMU-tested RTL8139
-  network/browser smoke path for ARP, ICMP, one UDP DNS A-record query for
-  `www.google.com`, one TCP port-443 TLS 1.3 handshake, one encrypted HTTPS
-  homepage GET, one decrypted Google `HTTP/1.1 200` status response, and a
-  scrollable fixed-buffer text extraction of Google's returned HTML.
+  It also has a minimal QEMU-tested RTL8139 network/browser smoke path for ARP,
+  ICMP, UDP DNS A-record queries for `www.google.com`, TCP port-443 TLS 1.3,
+  encrypted HTTPS GETs, decrypted Google `HTTP/1.1 200` responses, a scrollable
+  fixed-buffer text extraction of Google's returned HTML, and a NetSurf
+  `NETSURF.LEO` smoke that fetches real Google Search body bytes through the
+  LeonOS ring-3 HTTPS stream API, streams the real HTML body into NetSurf
+  callbacks, reaches NetSurf body parsing, redraws, quits, and returns to the
+  kernel. `NETSURF.LEO` now builds Duktape plus generated DOM bindings, but
+  external scripts and modern Web APIs are still incomplete.
 - The ring-3 path is a real privilege boundary (GDT user descriptors, a TSS,
   ring-0/ring-3 switching via `iret`, and a DPL-3 syscall gate), but it is NOT
   a process model. It still has:
@@ -657,6 +717,7 @@ See `docs\REAL_OS_PLAN.md` for the milestone plan and bug policy.
     directory with one temporary user virtual mapping);
   - no per-process file handles, no `fork`/`exec`, and no user shell;
   - no preemptive scheduling of user code, no signals, no SMP, no sockets,
-    no general TLS/HTML/JavaScript/full browser, and no real security hardening;
+    no general TLS socket API, no Chrome-class JavaScript compatibility, no
+    pixel-accurate full browser, and no real security hardening;
   - no general writable filesystem and no dynamic linking.
 - LeonOS is a hobby OS, not a Windows or Linux replacement.

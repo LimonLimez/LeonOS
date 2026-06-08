@@ -11,6 +11,6 @@
 #include "../../../src32/include/leonos_user.h"
 
 #define LEONOS_USER_VIRT_BASE 0x40000000u
-#define LEONOS_USER_IMAGE_MAX (1024u * 1024u)
+#define LEONOS_USER_IMAGE_MAX (2u * 1024u * 1024u)
 
 #endif

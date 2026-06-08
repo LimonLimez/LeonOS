@@ -42,6 +42,19 @@ function Set-UInt32Le {
     $Bytes[$Offset + 3] = [byte] (($Value -shr 24) -band 0xFF)
 }
 
+function Sync-Leo1ImageSize {
+    param([byte[]] $Bytes)
+    if ($Bytes.Length -lt 20) {
+        throw "LEO1 image is too small to patch."
+    }
+    $ImageSize = $Bytes.Length
+    $Bytes[12] = [byte] ($ImageSize -band 0xFF)
+    $Bytes[13] = [byte] (($ImageSize -shr 8) -band 0xFF)
+    $Bytes[14] = [byte] (($ImageSize -shr 16) -band 0xFF)
+    $Bytes[15] = [byte] (($ImageSize -shr 24) -band 0xFF)
+    return $Bytes
+}
+
 function ConvertTo-FatName {
     param([string] $Name)
     $Upper = $Name.ToUpperInvariant()
@@ -396,6 +409,255 @@ if ($UserCBytes.Length -gt 1048576) {
     throw "UCDEMO.LEO exceeds the current 1 MiB user-app loader limit."
 }
 Add-FileToImage "UCDEMO.LEO" $UserCBytes 0x20
+
+# Build the ring-3 browser launcher (opens the kernel HTTPS browser after exit).
+$UserBrowserCrtObj = Join-Path $Dist "ubrowser-crt0.o"
+$UserBrowserCObj = Join-Path $Dist "ubrowser.o"
+$UserBrowserElf = Join-Path $Dist "UBROWSER.elf"
+$UserBrowserBin = Join-Path $Dist "UBROWSER.LEO"
+& $Nasm -f elf32 (Join-Path $UserRoot "crt0.asm") -o $UserBrowserCrtObj
+if ($LASTEXITCODE -ne 0) {
+    throw "NASM failed while assembling src32\user\crt0.asm for UBROWSER."
+}
+if ($Toolchain.Kind -eq "clang-lld") {
+    & $Toolchain.Cc `
+        "--target=i686-elf" `
+        "-std=c11" `
+        "-Os" `
+        "-ffreestanding" `
+        "-fno-builtin" `
+        "-fno-stack-protector" `
+        "-fno-jump-tables" `
+        "-fno-pic" `
+        "-fno-pie" `
+        "-mno-sse" `
+        "-mno-mmx" `
+        "-m32" `
+        "-nostdinc" `
+        "-Wall" `
+        "-Wextra" `
+        "-I$Include" `
+        "-c" (Join-Path $UserRoot "ubrowser.c") `
+        "-o" $UserBrowserCObj
+    if ($LASTEXITCODE -ne 0) {
+        throw "clang failed while building src32\user\ubrowser.c."
+    }
+    & $Toolchain.Ld `
+        "-m" "elf_i386" `
+        "-T" (Join-Path $UserRoot "leonos_user.ld") `
+        "-nostdlib" `
+        "-Map" (Join-Path $Dist "UBROWSER.link.map") `
+        "-o" $UserBrowserElf `
+        $UserBrowserCrtObj `
+        $UserBrowserCObj
+    if ($LASTEXITCODE -ne 0) {
+        throw "ld.lld failed while linking UBROWSER.elf."
+    }
+} elseif ($Toolchain.Kind -eq "i686-elf-gcc") {
+    & $Toolchain.Cc `
+        "-std=c11" `
+        "-Os" `
+        "-ffreestanding" `
+        "-fno-builtin" `
+        "-fno-stack-protector" `
+        "-fno-jump-tables" `
+        "-fno-pic" `
+        "-fno-pie" `
+        "-mno-sse" `
+        "-mno-mmx" `
+        "-m32" `
+        "-nostdinc" `
+        "-Wall" `
+        "-Wextra" `
+        "-I$Include" `
+        "-c" (Join-Path $UserRoot "ubrowser.c") `
+        "-o" $UserBrowserCObj
+    if ($LASTEXITCODE -ne 0) {
+        throw "i686-elf-gcc failed while building src32\user\ubrowser.c."
+    }
+    & $Toolchain.Ld `
+        "-T" (Join-Path $UserRoot "leonos_user.ld") `
+        "-nostdlib" `
+        "-Map" (Join-Path $Dist "UBROWSER.link.map") `
+        "-o" $UserBrowserElf `
+        $UserBrowserCrtObj `
+        $UserBrowserCObj
+    if ($LASTEXITCODE -ne 0) {
+        throw "i686-elf-ld failed while linking UBROWSER.elf."
+    }
+} else {
+    throw "Unsupported toolchain kind '$($Toolchain.Kind)' while building UBROWSER.LEO."
+}
+& $Toolchain.Objcopy "-O" "binary" $UserBrowserElf $UserBrowserBin
+if ($LASTEXITCODE -ne 0) {
+    throw "objcopy failed while producing UBROWSER.LEO."
+}
+$UserBrowserBytes = Sync-Leo1ImageSize ([System.IO.File]::ReadAllBytes($UserBrowserBin))
+[System.IO.File]::WriteAllBytes($UserBrowserBin, $UserBrowserBytes)
+if ($UserBrowserBytes.Length -lt 32 -or
+    $UserBrowserBytes[0] -ne 0x4C -or $UserBrowserBytes[1] -ne 0x45 -or
+    $UserBrowserBytes[2] -ne 0x4F -or $UserBrowserBytes[3] -ne 0x31) {
+    throw "UBROWSER.LEO is missing the LEO1 header."
+}
+if ($UserBrowserBytes[4] -ne 0x02) {
+    throw "UBROWSER.LEO must declare LEO1 ABI version 2 (ring-3 user app)."
+}
+if ($UserBrowserBytes.Length -gt 1048576) {
+    throw "UBROWSER.LEO exceeds the current 1 MiB user-app loader limit."
+}
+Add-FileToImage "UBROWSER.LEO" $UserBrowserBytes 0x20
+
+# NetSurf port runtime harness: yield/millis/malloc while drawing, then browser open.
+$UserNetCrtObj = Join-Path $Dist "unetsurf-crt0.o"
+$UserNetCObj = Join-Path $Dist "unetsurf.o"
+$UserNetElf = Join-Path $Dist "UNETRUN.elf"
+$UserNetBin = Join-Path $Dist "UNETRUN.LEO"
+& $Nasm -f elf32 (Join-Path $UserRoot "crt0.asm") -o $UserNetCrtObj
+if ($LASTEXITCODE -ne 0) {
+    throw "NASM failed while assembling src32\user\crt0.asm for UNETRUN."
+}
+if ($Toolchain.Kind -eq "clang-lld") {
+    & $Toolchain.Cc `
+        "--target=i686-elf" "-std=c11" "-Os" "-ffreestanding" "-fno-builtin" `
+        "-fno-stack-protector" "-fno-jump-tables" "-fno-pic" "-fno-pie" `
+        "-mno-sse" "-mno-mmx" "-m32" "-nostdinc" "-Wall" "-Wextra" `
+        "-I$Include" "-c" (Join-Path $UserRoot "unetsurf.c") "-o" $UserNetCObj
+    if ($LASTEXITCODE -ne 0) { throw "clang failed while building unetsurf.c." }
+    & $Toolchain.Ld "-m" "elf_i386" "-T" (Join-Path $UserRoot "leonos_user.ld") `
+        "-nostdlib" "-Map" (Join-Path $Dist "UNETRUN.link.map") "-o" $UserNetElf `
+        $UserNetCrtObj $UserNetCObj
+    if ($LASTEXITCODE -ne 0) { throw "ld.lld failed while linking UNETRUN.elf." }
+} elseif ($Toolchain.Kind -eq "i686-elf-gcc") {
+    & $Toolchain.Cc `
+        "-std=c11" "-Os" "-ffreestanding" "-fno-builtin" "-fno-stack-protector" `
+        "-fno-jump-tables" "-fno-pic" "-fno-pie" "-mno-sse" "-mno-mmx" "-m32" `
+        "-nostdinc" "-Wall" "-Wextra" "-I$Include" `
+        "-c" (Join-Path $UserRoot "unetsurf.c") "-o" $UserNetCObj
+    if ($LASTEXITCODE -ne 0) { throw "i686-elf-gcc failed while building unetsurf.c." }
+    & $Toolchain.Ld "-T" (Join-Path $UserRoot "leonos_user.ld") "-nostdlib" `
+        "-Map" (Join-Path $Dist "UNETRUN.link.map") "-o" $UserNetElf $UserNetCrtObj $UserNetCObj
+    if ($LASTEXITCODE -ne 0) { throw "i686-elf-ld failed while linking UNETRUN.elf." }
+} else {
+    throw "Unsupported toolchain kind '$($Toolchain.Kind)' while building UNETRUN.LEO."
+}
+& $Toolchain.Objcopy "-O" "binary" $UserNetElf $UserNetBin
+if ($LASTEXITCODE -ne 0) { throw "objcopy failed while producing UNETRUN.LEO." }
+$UserNetBytes = Sync-Leo1ImageSize ([System.IO.File]::ReadAllBytes($UserNetBin))
+[System.IO.File]::WriteAllBytes($UserNetBin, $UserNetBytes)
+if ($UserNetBytes.Length -gt 1048576) {
+    throw "UNETRUN.LEO exceeds the current 1 MiB user-app loader limit."
+}
+Add-FileToImage "UNETRUN.LEO" $UserNetBytes 0x20
+
+# User HTTPS fetch then kernel browser render (UWEB.LEO).
+$UserWebCrtObj = Join-Path $Dist "uweb-crt0.o"
+$UserWebCObj = Join-Path $Dist "uweb.o"
+$UserWebElf = Join-Path $Dist "UWEB.elf"
+$UserWebBin = Join-Path $Dist "UWEB.LEO"
+& $Nasm -f elf32 (Join-Path $UserRoot "crt0.asm") -o $UserWebCrtObj
+if ($Toolchain.Kind -eq "clang-lld") {
+    & $Toolchain.Cc `
+        "--target=i686-elf" "-std=c11" "-Os" "-ffreestanding" "-fno-builtin" `
+        "-fno-stack-protector" "-fno-jump-tables" "-fno-pic" "-fno-pie" `
+        "-mno-sse" "-mno-mmx" "-m32" "-nostdinc" "-Wall" "-Wextra" `
+        "-I$Include" "-c" (Join-Path $UserRoot "uweb.c") "-o" $UserWebCObj
+    if ($LASTEXITCODE -ne 0) { throw "clang failed while building uweb.c." }
+    & $Toolchain.Ld "-m" "elf_i386" "-T" (Join-Path $UserRoot "leonos_user.ld") `
+        "-nostdlib" "-Map" (Join-Path $Dist "UWEB.link.map") "-o" $UserWebElf `
+        $UserWebCrtObj $UserWebCObj
+    if ($LASTEXITCODE -ne 0) { throw "ld.lld failed while linking UWEB.elf." }
+} elseif ($Toolchain.Kind -eq "i686-elf-gcc") {
+    & $Toolchain.Cc `
+        "-std=c11" "-Os" "-ffreestanding" "-fno-builtin" "-fno-stack-protector" `
+        "-fno-jump-tables" "-fno-pic" "-fno-pie" "-mno-sse" "-mno-mmx" "-m32" `
+        "-nostdinc" "-Wall" "-Wextra" "-I$Include" `
+        "-c" (Join-Path $UserRoot "uweb.c") "-o" $UserWebCObj
+    if ($LASTEXITCODE -ne 0) { throw "i686-elf-gcc failed while building uweb.c." }
+    & $Toolchain.Ld "-T" (Join-Path $UserRoot "leonos_user.ld") "-nostdlib" `
+        "-Map" (Join-Path $Dist "UWEB.link.map") "-o" $UserWebElf $UserWebCrtObj $UserWebCObj
+    if ($LASTEXITCODE -ne 0) { throw "i686-elf-ld failed while linking UWEB.elf." }
+} else {
+    throw "Unsupported toolchain while building UWEB.LEO."
+}
+& $Toolchain.Objcopy "-O" "binary" $UserWebElf $UserWebBin
+$UserWebBytes = Sync-Leo1ImageSize ([System.IO.File]::ReadAllBytes($UserWebBin))
+[System.IO.File]::WriteAllBytes($UserWebBin, $UserWebBytes)
+if ($UserWebBytes.Length -gt 1048576) {
+    throw "UWEB.LEO exceeds the current 1 MiB user-app loader limit."
+}
+Add-FileToImage "UWEB.LEO" $UserWebBytes 0x20
+
+# User HTTPS stream probe (USTREAM.LEO).
+$UserStreamCrtObj = Join-Path $Dist "ustream-crt0.o"
+$UserStreamCObj = Join-Path $Dist "ustream.o"
+$UserStreamElf = Join-Path $Dist "USTREAM.elf"
+$UserStreamBin = Join-Path $Dist "USTREAM.LEO"
+& $Nasm -f elf32 (Join-Path $UserRoot "crt0.asm") -o $UserStreamCrtObj
+if ($Toolchain.Kind -eq "clang-lld") {
+    & $Toolchain.Cc `
+        "--target=i686-elf" "-std=c11" "-Os" "-ffreestanding" "-fno-builtin" `
+        "-fno-stack-protector" "-fno-jump-tables" "-fno-pic" "-fno-pie" `
+        "-mno-sse" "-mno-mmx" "-m32" "-nostdinc" "-Wall" "-Wextra" `
+        "-I$Include" "-c" (Join-Path $UserRoot "ustream.c") "-o" $UserStreamCObj
+    if ($LASTEXITCODE -ne 0) { throw "clang failed while building ustream.c." }
+    & $Toolchain.Ld "-m" "elf_i386" "-T" (Join-Path $UserRoot "leonos_user.ld") `
+        "-nostdlib" "-Map" (Join-Path $Dist "USTREAM.link.map") "-o" $UserStreamElf `
+        $UserStreamCrtObj $UserStreamCObj
+    if ($LASTEXITCODE -ne 0) { throw "ld.lld failed while linking USTREAM.elf." }
+} elseif ($Toolchain.Kind -eq "i686-elf-gcc") {
+    & $Toolchain.Cc `
+        "-std=c11" "-Os" "-ffreestanding" "-fno-builtin" "-fno-stack-protector" `
+        "-fno-jump-tables" "-fno-pic" "-fno-pie" "-mno-sse" "-mno-mmx" "-m32" `
+        "-nostdinc" "-Wall" "-Wextra" "-I$Include" `
+        "-c" (Join-Path $UserRoot "ustream.c") "-o" $UserStreamCObj
+    if ($LASTEXITCODE -ne 0) { throw "i686-elf-gcc failed while building ustream.c." }
+    & $Toolchain.Ld "-T" (Join-Path $UserRoot "leonos_user.ld") "-nostdlib" `
+        "-Map" (Join-Path $Dist "USTREAM.link.map") "-o" $UserStreamElf $UserStreamCrtObj $UserStreamCObj
+    if ($LASTEXITCODE -ne 0) { throw "i686-elf-ld failed while linking USTREAM.elf." }
+} else {
+    throw "Unsupported toolchain while building USTREAM.LEO."
+}
+& $Toolchain.Objcopy "-O" "binary" $UserStreamElf $UserStreamBin
+$UserStreamBytes = Sync-Leo1ImageSize ([System.IO.File]::ReadAllBytes($UserStreamBin))
+[System.IO.File]::WriteAllBytes($UserStreamBin, $UserStreamBytes)
+if ($UserStreamBytes.Length -gt 1048576) {
+    throw "USTREAM.LEO exceeds the current 1 MiB user-app loader limit."
+}
+Add-FileToImage "USTREAM.LEO" $UserStreamBytes 0x20
+
+$NetSurfLeoPath = Join-Path $Dist "netsurf-probe\NETSURF.LEO"
+if (Test-Path -LiteralPath $NetSurfLeoPath) {
+    $NetSurfLeoBytes = [System.IO.File]::ReadAllBytes($NetSurfLeoPath)
+    if ($NetSurfLeoBytes.Length -lt 32 -or
+        $NetSurfLeoBytes[0] -ne 0x4C -or $NetSurfLeoBytes[1] -ne 0x45 -or
+        $NetSurfLeoBytes[2] -ne 0x4F -or $NetSurfLeoBytes[3] -ne 0x31) {
+        throw "NETSURF.LEO is missing the LEO1 header."
+    }
+    if ($NetSurfLeoBytes[4] -ne 0x02) {
+        throw "NETSURF.LEO must declare LEO1 ABI version 2 (ring-3 user app)."
+    }
+    if ($NetSurfLeoBytes.Length -gt (4 * 1048576)) {
+        throw "NETSURF.LEO exceeds the current 4 MiB user-app loader limit."
+    }
+    Add-FileToImage "NETSURF.LEO" $NetSurfLeoBytes 0x20
+}
+
+$QuickJsLeoPath = Join-Path $Dist "quickjs-probe\UQJS.LEO"
+if (Test-Path -LiteralPath $QuickJsLeoPath) {
+    $QuickJsLeoBytes = [System.IO.File]::ReadAllBytes($QuickJsLeoPath)
+    if ($QuickJsLeoBytes.Length -lt 32 -or
+        $QuickJsLeoBytes[0] -ne 0x4C -or $QuickJsLeoBytes[1] -ne 0x45 -or
+        $QuickJsLeoBytes[2] -ne 0x4F -or $QuickJsLeoBytes[3] -ne 0x31) {
+        throw "UQJS.LEO is missing the LEO1 header."
+    }
+    if ($QuickJsLeoBytes[4] -ne 0x02) {
+        throw "UQJS.LEO must declare LEO1 ABI version 2 (ring-3 user app)."
+    }
+    if ($QuickJsLeoBytes.Length -gt (4 * 1048576)) {
+        throw "UQJS.LEO exceeds the current 4 MiB user-app loader limit."
+    }
+    Add-FileToImage "UQJS.LEO" $QuickJsLeoBytes 0x20
+}
 
 # Write both FAT copies.
 for ($Copy = 0; $Copy -lt $NumFats; $Copy++) {

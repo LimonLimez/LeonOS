@@ -30,7 +30,13 @@ typedef enum {
 #define SHELL_APP_WRITE 7u
 #define SHELL_APP_UGFX 8u
 #define SHELL_APP_UCDEMO 9u
-#define SHELL_APP_COUNT 10u
+#define SHELL_APP_UBROWSER 10u
+#define SHELL_APP_UNETRUN 11u
+#define SHELL_APP_UWEB 12u
+#define SHELL_APP_NETSURF 13u
+#define SHELL_APP_USTREAM 14u
+#define SHELL_APP_UQJS 15u
+#define SHELL_APP_COUNT 16u
 
 #define SHELL_ACTION_NONE 0u
 #define SHELL_ACTION_HELLO 1u
@@ -38,6 +44,12 @@ typedef enum {
 #define SHELL_ACTION_WRITE 3u
 #define SHELL_ACTION_UGFX 4u
 #define SHELL_ACTION_UCDEMO 5u
+#define SHELL_ACTION_UBROWSER 6u
+#define SHELL_ACTION_UNETRUN 7u
+#define SHELL_ACTION_UWEB 8u
+#define SHELL_ACTION_NETSURF 9u
+#define SHELL_ACTION_USTREAM 10u
+#define SHELL_ACTION_UQJS 11u
 #define SHELL_LOG_MAX 6u
 
 #define SHELL_WF_VISIBLE 1u
@@ -166,6 +178,18 @@ static const char app_name_ugfx[] = "Run UGFX";
 static const char app_desc_ugfx[] = "Ring-3 framebuffer app";
 static const char app_name_ucdemo[] = "Run C Demo";
 static const char app_desc_ucdemo[] = "Freestanding C user app";
+static const char app_name_ubrowser[] = "LeonOS Browser";
+static const char app_desc_ubrowser[] = "HTTPS browser launcher";
+static const char app_name_unetrun[] = "NetSurf Runtime";
+static const char app_desc_unetrun[] = "Port harness (yield/heap)";
+static const char app_name_uweb[] = "User Web";
+static const char app_desc_uweb[] = "HTTPS fetch + browser";
+static const char app_name_netsurf[] = "NetSurf Port";
+static const char app_desc_netsurf[] = "Real engine smoke app";
+static const char app_name_ustream[] = "Net Stream";
+static const char app_desc_ustream[] = "Chunked user HTTPS API";
+static const char app_name_uqjs[] = "QuickJS Core";
+static const char app_desc_uqjs[] = "Modern JS proof app";
 
 static const struct ShellApp shell_apps[SHELL_APP_COUNT] = {
     { SHELL_APP_FILES, SHELL_WIN_FILES, SHELL_ACTION_NONE, UI_SPRITE_FOLDER,
@@ -188,6 +212,18 @@ static const struct ShellApp shell_apps[SHELL_APP_COUNT] = {
       app_name_ugfx, app_desc_ugfx },
     { SHELL_APP_UCDEMO, SHELL_WIN_NONE, SHELL_ACTION_UCDEMO, UI_SPRITE_APPS,
       app_name_ucdemo, app_desc_ucdemo },
+    { SHELL_APP_UBROWSER, SHELL_WIN_NONE, SHELL_ACTION_UBROWSER, UI_SPRITE_INFO,
+      app_name_ubrowser, app_desc_ubrowser },
+    { SHELL_APP_UNETRUN, SHELL_WIN_NONE, SHELL_ACTION_UNETRUN, UI_SPRITE_INFO,
+      app_name_unetrun, app_desc_unetrun },
+    { SHELL_APP_UWEB, SHELL_WIN_NONE, SHELL_ACTION_UWEB, UI_SPRITE_INFO,
+      app_name_uweb, app_desc_uweb },
+    { SHELL_APP_NETSURF, SHELL_WIN_NONE, SHELL_ACTION_NETSURF, UI_SPRITE_INFO,
+      app_name_netsurf, app_desc_netsurf },
+    { SHELL_APP_USTREAM, SHELL_WIN_NONE, SHELL_ACTION_USTREAM, UI_SPRITE_INFO,
+      app_name_ustream, app_desc_ustream },
+    { SHELL_APP_UQJS, SHELL_WIN_NONE, SHELL_ACTION_UQJS, UI_SPRITE_INFO,
+      app_name_uqjs, app_desc_uqjs },
 };
 
 static struct ShellWin shell_wins[SHELL_WIN_MAX];
@@ -203,6 +239,7 @@ static u8 shell_browser_info_open;
 static u8 shell_browser_url_editing;
 static u16 shell_browser_url_edit_len;
 static char shell_browser_url_edit[NET_BROWSER_RESOURCE_URL_MAX];
+
 static i32 shell_drag_off_x;
 static i32 shell_drag_off_y;
 static u8 shell_hover_id;
@@ -2695,6 +2732,24 @@ static enum ShellSerialMsg shell_app_msg(u8 app_id)
     if (app_id == SHELL_APP_UCDEMO) {
         return SHELL_MSG_APP_UCDEMO;
     }
+    if (app_id == SHELL_APP_UBROWSER) {
+        return SHELL_MSG_APP_UBROWSER;
+    }
+    if (app_id == SHELL_APP_UNETRUN) {
+        return SHELL_MSG_APP_UNETRUN;
+    }
+    if (app_id == SHELL_APP_UWEB) {
+        return SHELL_MSG_APP_UWEB;
+    }
+    if (app_id == SHELL_APP_NETSURF) {
+        return SHELL_MSG_APP_NETSURF;
+    }
+    if (app_id == SHELL_APP_USTREAM) {
+        return SHELL_MSG_APP_USTREAM;
+    }
+    if (app_id == SHELL_APP_UQJS) {
+        return SHELL_MSG_APP_APPS;
+    }
     return SHELL_MSG_APP_APPS;
 }
 
@@ -2789,6 +2844,24 @@ static u8 shell_restore_or_create_window(u8 type)
     return shell_create(type, x, y, w, h);
 }
 
+void shell_browser_launch_pending_url(const char *url)
+{
+    u32 pos = 0u;
+    while (url[pos] != 0 && pos < NET_BROWSER_RESOURCE_URL_MAX - 1u) {
+        shell_browser_url_edit[pos] = url[pos];
+        pos += 1u;
+    }
+    shell_browser_url_edit[pos] = 0;
+    shell_browser_url_edit_len = (u16) pos;
+    shell_browser_url_editing = 0u;
+    net_browser_open_url(shell_browser_url_edit);
+    if (shell_restore_or_create_window(SHELL_WIN_NET) == 0xFFu) {
+        return;
+    }
+    shell_ui_pulse();
+    dirty = 1;
+}
+
 static u8 shell_launch_app(u8 app_id)
 {
     const struct ShellApp *app = shell_find_app(app_id);
@@ -2801,12 +2874,30 @@ static u8 shell_launch_app(u8 app_id)
     }
     if (app->action == SHELL_ACTION_UHELLO ||
         app->action == SHELL_ACTION_UGFX ||
-        app->action == SHELL_ACTION_UCDEMO) {
+        app->action == SHELL_ACTION_UCDEMO ||
+        app->action == SHELL_ACTION_UBROWSER ||
+        app->action == SHELL_ACTION_UNETRUN ||
+        app->action == SHELL_ACTION_UWEB ||
+        app->action == SHELL_ACTION_NETSURF ||
+        app->action == SHELL_ACTION_USTREAM ||
+        app->action == SHELL_ACTION_UQJS) {
         pending_user_app = USER_APP_UHELLO;
         if (app->action == SHELL_ACTION_UGFX) {
             pending_user_app = USER_APP_UGFX;
         } else if (app->action == SHELL_ACTION_UCDEMO) {
             pending_user_app = USER_APP_UCDEMO;
+        } else if (app->action == SHELL_ACTION_UBROWSER) {
+            pending_user_app = USER_APP_UBROWSER;
+        } else if (app->action == SHELL_ACTION_UNETRUN) {
+            pending_user_app = USER_APP_UNETRUN;
+        } else if (app->action == SHELL_ACTION_UWEB) {
+            pending_user_app = USER_APP_UWEB;
+        } else if (app->action == SHELL_ACTION_NETSURF) {
+            pending_user_app = USER_APP_NETSURF;
+        } else if (app->action == SHELL_ACTION_USTREAM) {
+            pending_user_app = USER_APP_USTREAM;
+        } else if (app->action == SHELL_ACTION_UQJS) {
+            pending_user_app = USER_APP_UQJS;
         }
         shell_ui_pulse();
         dirty = 1;

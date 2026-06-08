@@ -1,0 +1,41 @@
+#ifndef LEONOS_LIBC_STDIO_H
+#define LEONOS_LIBC_STDIO_H
+
+#include <stddef.h>
+#include <stdarg.h>
+
+#define EOF (-1)
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+
+typedef struct leonos_file FILE;
+
+extern FILE *stdin;
+extern FILE *stdout;
+extern FILE *stderr;
+
+int printf(const char *fmt, ...);
+int fprintf(FILE *stream, const char *fmt, ...);
+int vfprintf(FILE *stream, const char *fmt, va_list ap);
+void setbuf(FILE *stream, char *buf);
+int sprintf(char *str, const char *fmt, ...);
+int snprintf(char *str, size_t size, const char *fmt, ...);
+int vsnprintf(char *str, size_t size, const char *fmt, va_list ap);
+int sscanf(const char *str, const char *fmt, ...);
+int putchar(int c);
+int fputc(int c, FILE *stream);
+int fputs(const char *s, FILE *stream);
+int fflush(FILE *stream);
+char *fgets(char *str, int size, FILE *stream);
+size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
+size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream);
+int feof(FILE *stream);
+int fseek(FILE *stream, long offset, int whence);
+long ftell(FILE *stream);
+FILE *fopen(const char *path, const char *mode);
+int fclose(FILE *stream);
+int remove(const char *path);
+int rename(const char *oldpath, const char *newpath);
+
+#endif

@@ -3,6 +3,8 @@ param(
     [string] $HddImage = "dist32\leonos32-hdd.img",
     [ValidateSet("Native1080p", "Small720p", "Small720pNet", "ScaledMaximize")]
     [string] $Mode = "Small720p",
+    [string] $NetSurfUrl = "https://www.google.com/?igu=1&hl=en&gbv=1",
+    [switch] $NetSurfInteractive,
     [switch] $Network,
     [switch] $FullScreen
 )
@@ -20,6 +22,11 @@ $Resolution = switch ($Mode) {
     default { throw "Unknown Mode '$Mode'." }
 }
 
+if ($NetSurfInteractive) {
+    $Network = $true
+    & (Join-Path $PSScriptRoot "..\ports\netsurf\build-leonos-probe.ps1") `
+        -StartUrl $NetSurfUrl -Interactive | Write-Host
+}
 & (Join-Path $PSScriptRoot "build32-image.ps1") -Resolution $Resolution | Write-Host
 & (Join-Path $PSScriptRoot "build32-hdd.ps1") | Write-Host
 
@@ -47,7 +54,7 @@ $Arguments = @(
     "-name", "LeonOS-32BitHdd-$Mode",
     "-machine", "pc",
     "-cpu", "qemu32",
-    "-m", "32M",
+    "-m", "256M",
     "-drive", "file=$ImagePath,format=raw,if=floppy",
     "-drive", "file=$HddPath,format=raw,if=ide,index=0,media=disk",
     "-boot", "a",

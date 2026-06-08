@@ -36,7 +36,9 @@ $Repos = @(
     "libnsbmp",
     "libnsgif",
     "libsvgtiny",
+    "libnsutils",
     "libnsfb",
+    "nsgenbind",
     "netsurf"
 )
 

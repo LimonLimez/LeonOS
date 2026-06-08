@@ -10,7 +10,10 @@ struct Sha256Ctx {
     u64 total_len;
 };
 
-static u8 tls_poly_msg[5400];
+#define TLS_AEAD_MAX_CIPHER 18448u
+#define TLS_POLY_MSG_MAX 18512u
+
+static u8 tls_poly_msg[TLS_POLY_MSG_MAX];
 
 static u32 rot_r32(u32 x, u32 n)
 {
@@ -563,7 +566,7 @@ static u8 chacha20_poly1305_decrypt(const u8 key[32], const u8 iv[12],
                                     u64 seq, const u8 aad[5],
                                     u8 *cipher, u32 cipher_len)
 {
-    if (cipher_len < 16u || cipher_len > 5200u) {
+    if (cipher_len < 16u || cipher_len > TLS_AEAD_MAX_CIPHER) {
         return 0u;
     }
     u8 nonce[12];
