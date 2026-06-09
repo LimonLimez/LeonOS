@@ -1161,6 +1161,21 @@ static void qjs_set_native_attribute_cstr(dom_node *node,
 	dom_string_unref(attr_name);
 }
 
+static void qjs_remove_native_attribute_cstr(dom_node *node, const char *name)
+{
+	dom_string *attr_name = NULL;
+	if (node == NULL || name == NULL || name[0] == 0 ||
+	    qjs_native_node_type(node) != DOM_ELEMENT_NODE) {
+		return;
+	}
+	if (dom_string_create((const uint8_t *) name, strlen(name),
+			      &attr_name) != DOM_NO_ERR) {
+		return;
+	}
+	(void) dom_element_remove_attribute((dom_element *) node, attr_name);
+	dom_string_unref(attr_name);
+}
+
 static void qjs_copy_js_string(char *dst, size_t dst_len,
 			       JSContext *ctx, JSValueConst value)
 {
@@ -1304,6 +1319,36 @@ static void qjs_sync_style_attribute(JSContext *ctx, JSValueConst obj,
 	JS_FreeValue(ctx, style);
 }
 
+static void qjs_sync_native_string_attr(JSContext *ctx, JSValueConst obj,
+					dom_node *node, const char *prop,
+					const char *attr)
+{
+	JSValue value = JS_GetPropertyStr(ctx, obj, prop);
+	char text[1024];
+	qjs_copy_js_string(text, sizeof(text), ctx, value);
+	JS_FreeValue(ctx, value);
+	if (text[0] != 0) {
+		qjs_set_native_attribute_cstr(node, attr, text);
+	}
+}
+
+static void qjs_sync_native_bool_attr(JSContext *ctx, JSValueConst obj,
+				      dom_node *node, const char *prop,
+				      const char *attr)
+{
+	JSValue value = JS_GetPropertyStr(ctx, obj, prop);
+	if (JS_IsUndefined(value) || JS_IsNull(value)) {
+		JS_FreeValue(ctx, value);
+		return;
+	}
+	if (JS_ToBool(ctx, value) > 0) {
+		qjs_set_native_attribute_cstr(node, attr, attr);
+	} else {
+		qjs_remove_native_attribute_cstr(node, attr);
+	}
+	JS_FreeValue(ctx, value);
+}
+
 static void qjs_sync_native_element_props(JSContext *ctx, JSValueConst obj)
 {
 	struct qjs_native_node *native = qjs_get_native_node(obj);
@@ -1325,6 +1370,35 @@ static void qjs_sync_native_element_props(JSContext *ctx, JSValueConst obj)
 	if (text[0] != 0) {
 		qjs_set_native_attribute_cstr(native->node, "class", text);
 	}
+	qjs_sync_native_string_attr(ctx, obj, native->node, "src", "src");
+	qjs_sync_native_string_attr(ctx, obj, native->node, "href", "href");
+	qjs_sync_native_string_attr(ctx, obj, native->node, "alt", "alt");
+	qjs_sync_native_string_attr(ctx, obj, native->node, "title", "title");
+	qjs_sync_native_string_attr(ctx, obj, native->node, "type", "type");
+	qjs_sync_native_string_attr(ctx, obj, native->node, "name", "name");
+	qjs_sync_native_string_attr(ctx, obj, native->node, "value", "value");
+	qjs_sync_native_string_attr(ctx, obj, native->node, "defaultValue",
+				    "value");
+	qjs_sync_native_string_attr(ctx, obj, native->node, "placeholder",
+				    "placeholder");
+	qjs_sync_native_string_attr(ctx, obj, native->node, "role", "role");
+	qjs_sync_native_string_attr(ctx, obj, native->node, "htmlFor", "for");
+	qjs_sync_native_string_attr(ctx, obj, native->node, "ariaLabel",
+				    "aria-label");
+	qjs_sync_native_bool_attr(ctx, obj, native->node, "disabled",
+				  "disabled");
+	qjs_sync_native_bool_attr(ctx, obj, native->node, "checked",
+				  "checked");
+	qjs_sync_native_bool_attr(ctx, obj, native->node, "selected",
+				  "selected");
+	qjs_sync_native_bool_attr(ctx, obj, native->node, "multiple",
+				  "multiple");
+	qjs_sync_native_bool_attr(ctx, obj, native->node, "required",
+				  "required");
+	qjs_sync_native_bool_attr(ctx, obj, native->node, "readOnly",
+				  "readonly");
+	qjs_sync_native_bool_attr(ctx, obj, native->node, "hidden",
+				  "hidden");
 	qjs_sync_style_attribute(ctx, obj, native->node);
 }
 
@@ -3247,7 +3321,7 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"function cloneElem(s,deep){if(!s)return null;if(s.nodeType===3)return textNode(s.nodeValue||s.textContent||'');"
 		"var c=el(s.tagName||s.nodeName||'div');c.id=s.id||'';c.className=s.className||'';c.value=s.value||'';"
 		"c.defaultValue=s.defaultValue||'';c.checked=!!s.checked;c.selected=!!s.selected;c.type=s.type||'';"
-		"c.name=s.name||'';c.href=s.href||'';c.textContent=s.textContent||'';if(s.attributes){for(var k in s.attributes)"
+		"c.name=s.name||'';c.href=s.href||'';c.src=s.src||'';c.alt=s.alt||'';c.placeholder=s.placeholder||'';c.textContent=s.textContent||'';if(s.attributes){for(var k in s.attributes)"
 		"if(s.attributes.hasOwnProperty(k))c.setAttribute(k,s.attributes[k]);}c._innerHTML=s._innerHTML||'';"
 		"if(deep){var cs=s.childNodes||[];for(var i=0;i<cs.length;i++)appendKid(c,cloneElem(cs[i],true));}"
 		"return c;}"
@@ -3258,14 +3332,15 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"e.parentNode=null;e.ownerDocument=g.document||null;e.textContent='';"
 		"e.parentElement=null;e.firstChild=null;e.lastChild=null;e.firstElementChild=null;e.lastElementChild=null;"
 		"e.innerHTML='';e.className='';e.id='';e.value='';e.defaultValue='';e.checked=false;e.selected=false;"
-		"e.type='';e.name='';e.href='';e.protocol='';e.host='';e.hostname='';e.port='';e.pathname='';e.search='';e.hash='';e.origin='';e.classList=cl(e);"
+		"e.disabled=false;e.multiple=false;e.required=false;e.readOnly=false;e.hidden=false;"
+		"e.type='';e.name='';e.href='';e.src='';e.alt='';e.title='';e.placeholder='';e.role='';e.protocol='';e.host='';e.hostname='';e.port='';e.pathname='';e.search='';e.hash='';e.origin='';e.classList=cl(e);"
 		"e.appendChild=function(c){return appendKid(e,c);};"
 		"e.insertBefore=function(c,r){if(!r)return appendKid(e,c);var i=e.childNodes.indexOf(r);"
 		"if(i<0)return appendKid(e,c);c.parentNode=e;c.parentElement=e;e.childNodes.splice(i,0,c);resyncKids(e);return c;};"
 		"e.removeChild=function(c){var i=e.childNodes.indexOf(c);if(i>=0){e.childNodes.splice(i,1);"
 		"c.parentNode=null;c.parentElement=null;resyncKids(e);}return c;};"
-		"e.setAttribute=function(n,v){n=String(n);v=String(v);e.attributes[n]=v;if(n==='id')e.id=v;if(n==='class')e.className=v;"
-		"if(n==='href'&&tag==='A')setAnchor(e,v);};"
+		"e.setAttribute=function(n,v){n=String(n);v=String(v);e.attributes[n]=v;if(n==='id')e.id=v;else if(n==='class')e.className=v;"
+		"else if(n==='href'&&tag==='A')setAnchor(e,v);else if(n==='for')e.htmlFor=v;else e[n]=v;};"
 		"e.getAttribute=function(n){n=String(n);return e.attributes.hasOwnProperty(n)?e.attributes[n]:null;};"
 		"e.hasAttribute=function(n){return e.attributes.hasOwnProperty(String(n));};"
 		"e.removeAttribute=function(n){delete e.attributes[String(n)];};"
@@ -3275,6 +3350,7 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"e.getElementsByTagName=function(t){return tagSearch(e,t);};e.getElementsByClassName=arr;"
 		"e.cloneNode=function(deep){return cloneElem(e,!!deep);};return e;}"
 		"g.window=g.window||g;g.self=g.self||g;g.globalThis=g.globalThis||g;"
+		"g.top=g.top||g;g.parent=g.parent||g;g.frames=g.frames||g;g.length=g.length||0;"
 		"function addEvt(n,f){if(typeof f==='function'&&(n==='load'||n==='DOMContentLoaded'||n==='readystatechange'))g.setTimeout(f,0);}"
 		"g.addEventListener=g.addEventListener||addEvt;g.removeEventListener=g.removeEventListener||noop;"
 		"g.dispatchEvent=g.dispatchEvent||function(){return true;};"
