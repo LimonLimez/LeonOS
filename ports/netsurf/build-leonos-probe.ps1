@@ -886,6 +886,7 @@ function Ensure-NetSurfLeonOsSourcePatches {
     $CssSource = Join-Path $NetSurfRoot "content\handlers\css\css.c"
     $HtmlSource = Join-Path $NetSurfRoot "content\handlers\html\html.c"
     $ObjectSource = Join-Path $NetSurfRoot "content\handlers\html\object.c"
+    $RedrawSource = Join-Path $NetSurfRoot "content\handlers\html\redraw.c"
     $ScriptSource = Join-Path $NetSurfRoot "content\handlers\html\script.c"
     $PlotSource = Join-Path $NetSurfRoot "frontends\monkey\plot.c"
     $BrowserSource = Join-Path $NetSurfRoot "frontends\monkey\browser.c"
@@ -900,6 +901,9 @@ function Ensure-NetSurfLeonOsSourcePatches {
     }
     if (-not (Test-Path -LiteralPath $ObjectSource)) {
         throw "NetSurf HTML object source missing at $ObjectSource."
+    }
+    if (-not (Test-Path -LiteralPath $RedrawSource)) {
+        throw "NetSurf HTML redraw source missing at $RedrawSource."
     }
     if (-not (Test-Path -LiteralPath $FetchSource)) {
         throw "NetSurf fetch source missing at $FetchSource."
@@ -1614,6 +1618,39 @@ struct leonos_css_var {
         }
         $ObjectText = $ObjectText.Replace($OldObjectDone, $NewObjectDone)
         [System.IO.File]::WriteAllText($ObjectSource, $ObjectText, [System.Text.Encoding]::ASCII)
+    }
+
+    $RedrawText = [System.IO.File]::ReadAllText($RedrawSource) -replace "`r`n", "`n"
+    if ($RedrawText -notmatch 'HTML REDRAW DEFER NO LAYOUT') {
+        $OldRedrawGuard = @'
+	box = html->layout;
+	assert(box);
+
+#ifdef LEONOS_USER_APP
+	leonos_redraw_text_diag_count = 0u;
+#endif
+'@
+        $OldRedrawGuard = $OldRedrawGuard -replace "`r`n", "`n"
+        $NewRedrawGuard = @'
+	box = html->layout;
+#ifdef LEONOS_USER_APP
+	if (box == NULL || html->box_conversion_context != NULL) {
+		leonos_write("HTML REDRAW DEFER NO LAYOUT\r\n");
+		return true;
+	}
+#endif
+	assert(box);
+
+#ifdef LEONOS_USER_APP
+	leonos_redraw_text_diag_count = 0u;
+#endif
+'@
+        $NewRedrawGuard = $NewRedrawGuard -replace "`r`n", "`n"
+        if (-not $RedrawText.Contains($OldRedrawGuard)) {
+            throw "Could not patch NetSurf LeonOS redraw conversion guard."
+        }
+        $RedrawText = $RedrawText.Replace($OldRedrawGuard, $NewRedrawGuard)
+        [System.IO.File]::WriteAllText($RedrawSource, $RedrawText, [System.Text.Encoding]::ASCII)
     }
 
     $FetchText = [System.IO.File]::ReadAllText($FetchSource) -replace "`r`n", "`n"

@@ -101,6 +101,9 @@ try {
     $SawFetchBytes = $false
     $SawFetchFinished = $false
     $SawRedrawAfterFetch = $false
+    $SawImageDecoded = $false
+    $SawBitmapPlot = $false
+    $SawDomReflow = $false
     $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $Deadline -and -not $Process.HasExited) {
         $Text = Read-LeonOsSerialLog $SerialLog
@@ -117,7 +120,17 @@ try {
         if ($SawFetchFinished -and $Text.Contains("WINDOW REDRAW WIN 0 STOP")) {
             $SawRedrawAfterFetch = $true
         }
-        if ($SawFetchBytes -and $SawFetchFinished -and $SawRedrawAfterFetch) {
+        if ($Text.Contains("GENERIC LEONOS STB IMAGE DECODED")) {
+            $SawImageDecoded = $true
+        }
+        if ($Text.Contains("PLOT BITMAP X ")) {
+            $SawBitmapPlot = $true
+        }
+        if ($Text.Contains("HTML LEONOS DOM REBUILD REFLOW")) {
+            $SawDomReflow = $true
+        }
+        if ($SawFetchBytes -and $SawFetchFinished -and $SawRedrawAfterFetch -and
+            $SawImageDecoded -and $SawBitmapPlot -and $SawDomReflow) {
             break
         }
         Start-Sleep -Milliseconds 100
