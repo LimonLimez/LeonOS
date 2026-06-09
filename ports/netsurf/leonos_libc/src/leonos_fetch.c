@@ -31,7 +31,7 @@ unsigned int leonos_netsurf_fetch_generation_for_script;
 #define LEONOS_FETCH_MAX_URL_BYTES 4095u
 #define LEONOS_FETCH_CSS_SOFT_LIMIT 0u
 #define LEONOS_FETCH_JS_SOFT_LIMIT 0u
-#define LEONOS_FETCH_ROBLOX_SCRIPT_BUDGET 64u
+#define LEONOS_FETCH_ROBLOX_SCRIPT_BUDGET 28u
 
 struct leonos_fetch_context {
     struct fetch *parent_fetch;
@@ -653,7 +653,15 @@ static bool leonos_fetch_url_is_roblox_deferred_media(const char *url)
         }
     }
     return strstr(url, "tr.rbxcdn.com/") != NULL ||
-           strstr(url, "vignette") != NULL;
+           strstr(url, "vignette") != NULL ||
+           (strstr(url, "images.rbxcdn.com/") != NULL &&
+            ((len >= 4u && strncmp(url + len - 4u, ".png", 4) == 0) ||
+             (len >= 4u && strncmp(url + len - 4u, ".jpg", 4) == 0) ||
+             (len >= 5u && strncmp(url + len - 5u, ".jpeg", 5) == 0) ||
+             (len >= 4u && strncmp(url + len - 4u, ".gif", 4) == 0) ||
+             (len >= 4u && strncmp(url + len - 4u, ".ico", 4) == 0) ||
+             (len >= 4u && strncmp(url + len - 4u, ".svg", 4) == 0) ||
+             (len >= 5u && strncmp(url + len - 5u, ".webp", 5) == 0)));
 }
 
 static void leonos_fetch_reset_roblox_dependencies(void)

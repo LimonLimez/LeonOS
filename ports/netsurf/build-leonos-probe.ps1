@@ -884,7 +884,11 @@ function Ensure-NetSurfLeonOsSourcePatches {
     $NetSurfRoot = Join-Path $VendorPath "netsurf"
     $FetchSource = Join-Path $NetSurfRoot "content\fetch.c"
     $CssSource = Join-Path $NetSurfRoot "content\handlers\css\css.c"
+    $HtmlCssSource = Join-Path $NetSurfRoot "content\handlers\html\css.c"
     $HtmlSource = Join-Path $NetSurfRoot "content\handlers\html\html.c"
+    $BoxTextareaSource = Join-Path $NetSurfRoot "content\handlers\html\box_textarea.c"
+    $FormSource = Join-Path $NetSurfRoot "content\handlers\html\form.c"
+    $FormsSource = Join-Path $NetSurfRoot "content\handlers\html\forms.c"
     $ObjectSource = Join-Path $NetSurfRoot "content\handlers\html\object.c"
     $RedrawSource = Join-Path $NetSurfRoot "content\handlers\html\redraw.c"
     $ScriptSource = Join-Path $NetSurfRoot "content\handlers\html\script.c"
@@ -898,8 +902,20 @@ function Ensure-NetSurfLeonOsSourcePatches {
     if (-not (Test-Path -LiteralPath $CssSource)) {
         throw "NetSurf CSS source missing at $CssSource."
     }
+    if (-not (Test-Path -LiteralPath $HtmlCssSource)) {
+        throw "NetSurf HTML CSS source missing at $HtmlCssSource."
+    }
     if (-not (Test-Path -LiteralPath $HtmlSource)) {
         throw "NetSurf HTML source missing at $HtmlSource."
+    }
+    if (-not (Test-Path -LiteralPath $BoxTextareaSource)) {
+        throw "NetSurf HTML textarea source missing at $BoxTextareaSource."
+    }
+    if (-not (Test-Path -LiteralPath $FormSource)) {
+        throw "NetSurf HTML form source missing at $FormSource."
+    }
+    if (-not (Test-Path -LiteralPath $FormsSource)) {
+        throw "NetSurf HTML forms source missing at $FormsSource."
     }
     if (-not (Test-Path -LiteralPath $ObjectSource)) {
         throw "NetSurf HTML object source missing at $ObjectSource."
@@ -1492,6 +1508,34 @@ struct leonos_css_var {
             $CssText = $CssText.Substring(0, $OldLeonOsStart) + $NewCssProcess + $CssText.Substring($OldLeonOsEnd)
         }
         [System.IO.File]::WriteAllText($CssSource, $CssText, [System.Text.Encoding]::ASCII)
+    }
+    $CssText = [System.IO.File]::ReadAllText($HtmlCssSource) -replace "`r`n", "`n"
+    if ($CssText -notmatch 'HTML CSS DYNAMIC STYLE SKIP') {
+        $OldCreateStyle = @'
+/* Extend array */
+	stylesheets = realloc(c->stylesheets,
+'@
+        $OldCreateStyle = $OldCreateStyle -replace "`r`n", "`n"
+        $NewCreateStyle = @'
+#ifdef LEONOS_USER_APP
+	if ((c->leonos_dom_rebuild_active ||
+	     c->base.status == CONTENT_STATUS_READY ||
+	     c->base.status == CONTENT_STATUS_DONE) &&
+	    c->select_ctx != NULL) {
+		leonos_css_log("HTML CSS DYNAMIC STYLE SKIP\r\n");
+		return NULL;
+	}
+#endif
+
+/* Extend array */
+	stylesheets = realloc(c->stylesheets,
+'@
+        $NewCreateStyle = $NewCreateStyle -replace "`r`n", "`n"
+        if (-not $CssText.Contains($OldCreateStyle)) {
+            throw "Could not patch NetSurf dynamic style skip."
+        }
+        $CssText = $CssText.Replace($OldCreateStyle, $NewCreateStyle)
+        [System.IO.File]::WriteAllText($HtmlCssSource, $CssText, [System.Text.Encoding]::ASCII)
     }
 
     $HtmlText = [System.IO.File]::ReadAllText($HtmlSource) -replace "`r`n", "`n"
@@ -2572,6 +2616,364 @@ monkey_window_handle_command(int argc, char **argv)
         $MainText = $MainText.Replace($OldBlockingCase, $NewBlockingCase)
     }
     [System.IO.File]::WriteAllText($MainSource, $MainText, [System.Text.Encoding]::ASCII)
+
+    $BoxTextareaText = [System.IO.File]::ReadAllText($BoxTextareaSource) -replace "`r`n", "`n"
+    if ($BoxTextareaText -notmatch 'leonos_box_textarea_log_enter') {
+        if ($BoxTextareaText -notmatch '#include <stdio.h>') {
+            $OldTextareaInclude = '#include <string.h>'
+            $NewTextareaInclude = @'
+#include <string.h>
+#include <stdio.h>
+'@
+            $NewTextareaInclude = $NewTextareaInclude -replace "`r`n", "`n"
+            if (-not $BoxTextareaText.Contains($OldTextareaInclude)) {
+                throw "Could not patch NetSurf textarea stdio include."
+            }
+            $BoxTextareaText = $BoxTextareaText.Replace($OldTextareaInclude, $NewTextareaInclude)
+        }
+        $OldTextareaHeader = @'
+#include "html/form_internal.h"
+
+
+nserror box_textarea_keypress(html_content *html, struct box *box, uint32_t key)
+'@
+        $OldTextareaHeader = $OldTextareaHeader -replace "`r`n", "`n"
+        $NewTextareaHeader = @'
+#include "html/form_internal.h"
+
+#ifdef LEONOS_USER_APP
+#include "leonos_user.h"
+static void leonos_box_textarea_log_enter(struct form_control *gadget,
+		uint32_t key, struct form *form)
+{
+	char detail[256];
+	int used = snprintf(detail, sizeof(detail),
+			"HTML FORM ENTER KEY %u TYPE %u FORM %u NAME %s VALUE %s ACTION %s\r\n",
+			(unsigned int)key,
+			gadget != NULL ? (unsigned int)gadget->type : 999u,
+			form != NULL ? 1u : 0u,
+			gadget != NULL && gadget->name != NULL ? gadget->name : "",
+			gadget != NULL && gadget->value != NULL ? gadget->value : "",
+			form != NULL && form->action != NULL ? form->action : "");
+	if (used > 0) {
+		leonos_write(detail);
+	}
+}
+#else
+static void leonos_box_textarea_log_enter(struct form_control *gadget,
+		uint32_t key, struct form *form)
+{
+	(void)gadget;
+	(void)key;
+	(void)form;
+}
+#endif
+
+nserror box_textarea_keypress(html_content *html, struct box *box, uint32_t key)
+'@
+        $NewTextareaHeader = $NewTextareaHeader -replace "`r`n", "`n"
+        if (-not $BoxTextareaText.Contains($OldTextareaHeader)) {
+            throw "Could not patch NetSurf textarea LeonOS diagnostics."
+        }
+        $BoxTextareaText = $BoxTextareaText.Replace($OldTextareaHeader, $NewTextareaHeader)
+        $OldTextareaSubmit = @'
+	case NS_KEY_NL:
+	case NS_KEY_CR:
+		if (form) {
+			res = form_submit(content_get_url(c),
+					  html->bw,
+					  form,
+					  NULL);
+		}
+		break;
+'@
+        $OldTextareaSubmit = $OldTextareaSubmit -replace "`r`n", "`n"
+        $NewTextareaSubmit = @'
+	case NS_KEY_NL:
+	case NS_KEY_CR:
+		leonos_box_textarea_log_enter(gadget, key, form);
+		if (form) {
+			res = form_submit(content_get_url(c),
+					  html->bw,
+					  form,
+					  NULL);
+		}
+		break;
+'@
+        $NewTextareaSubmit = $NewTextareaSubmit -replace "`r`n", "`n"
+        if (-not $BoxTextareaText.Contains($OldTextareaSubmit)) {
+            throw "Could not patch NetSurf textarea submit diagnostics."
+        }
+        $BoxTextareaText = $BoxTextareaText.Replace($OldTextareaSubmit, $NewTextareaSubmit)
+    }
+    [System.IO.File]::WriteAllText($BoxTextareaSource, $BoxTextareaText, [System.Text.Encoding]::ASCII)
+
+    $FormText = [System.IO.File]::ReadAllText($FormSource) -replace "`r`n", "`n"
+    if ($FormText -notmatch 'leonos_form_log_submit_start') {
+        $OldFormHeader = @'
+#include "html/form_internal.h"
+
+#define MAX_SELECT_HEIGHT 210
+'@
+        $OldFormHeader = $OldFormHeader -replace "`r`n", "`n"
+        $NewFormHeader = @'
+#include "html/form_internal.h"
+
+#ifdef LEONOS_USER_APP
+#include "leonos_user.h"
+static void leonos_form_log_text(const char *prefix, const char *text)
+{
+	leonos_write(prefix != NULL ? prefix : "HTML FORM ");
+	leonos_write(text != NULL ? text : "");
+	leonos_write("\r\n");
+}
+
+static void leonos_form_log_submit_start(struct form *form)
+{
+	char detail[256];
+	int used = snprintf(detail, sizeof(detail),
+			"HTML FORM SUBMIT START METHOD %u ACTION %s\r\n",
+			form != NULL ? (unsigned int)form->method : 999u,
+			form != NULL && form->action != NULL ? form->action : "");
+	if (used > 0) {
+		leonos_write(detail);
+	}
+}
+
+static void leonos_form_log_fetch_data(struct fetch_multipart_data *data)
+{
+	unsigned int count = 0u;
+	for (; data != NULL && count < 12u; data = data->next, count++) {
+		char detail[256];
+		int used = snprintf(detail, sizeof(detail),
+				"HTML FORM DATA %u NAME %s VALUE %s\r\n",
+				count,
+				data->name != NULL ? data->name : "",
+				data->value != NULL ? data->value : "");
+		if (used > 0) {
+			leonos_write(detail);
+		}
+	}
+}
+
+static void leonos_form_log_result(const char *prefix, nserror res)
+{
+	char detail[64];
+	int used = snprintf(detail, sizeof(detail), "%u\r\n",
+			(unsigned int)res);
+	leonos_write(prefix != NULL ? prefix : "HTML FORM RESULT ");
+	if (used > 0) {
+		leonos_write(detail);
+	}
+}
+#else
+static void leonos_form_log_text(const char *prefix, const char *text)
+{
+	(void)prefix;
+	(void)text;
+}
+
+static void leonos_form_log_submit_start(struct form *form)
+{
+	(void)form;
+}
+
+static void leonos_form_log_fetch_data(struct fetch_multipart_data *data)
+{
+	(void)data;
+}
+
+static void leonos_form_log_result(const char *prefix, nserror res)
+{
+	(void)prefix;
+	(void)res;
+}
+#endif
+
+#define MAX_SELECT_HEIGHT 210
+'@
+        $NewFormHeader = $NewFormHeader -replace "`r`n", "`n"
+        if (-not $FormText.Contains($OldFormHeader)) {
+            throw "Could not patch NetSurf form LeonOS diagnostics."
+        }
+        $FormText = $FormText.Replace($OldFormHeader, $NewFormHeader)
+        $OldSubmitStart = @'
+	assert(form != NULL);
+
+	/* obtain list of controls from DOM */
+	res = form_dom_to_data(form, submit_button, &success);
+	if (res != NSERROR_OK) {
+		return res;
+	}
+'@
+        $OldSubmitStart = $OldSubmitStart -replace "`r`n", "`n"
+        $NewSubmitStart = @'
+	assert(form != NULL);
+	leonos_form_log_submit_start(form);
+
+	/* obtain list of controls from DOM */
+	res = form_dom_to_data(form, submit_button, &success);
+	if (res != NSERROR_OK) {
+		leonos_form_log_result("HTML FORM DOM DATA ERROR ", res);
+		return res;
+	}
+	leonos_form_log_fetch_data(success);
+'@
+        $NewSubmitStart = $NewSubmitStart -replace "`r`n", "`n"
+        if (-not $FormText.Contains($OldSubmitStart)) {
+            throw "Could not patch NetSurf form submit start diagnostics."
+        }
+        $FormText = $FormText.Replace($OldSubmitStart, $NewSubmitStart)
+        $OldGetSubmit = @'
+	case method_GET:
+		res = form_url_encode(form, success, &data);
+		if (res == NSERROR_OK) {
+			/* Replace query segment */
+			res = nsurl_replace_query(action_url, data, &query_url);
+			if (res == NSERROR_OK) {
+				res = browser_window_navigate(target,
+							      query_url,
+							      page_url,
+							      BW_NAVIGATE_HISTORY,
+							      NULL,
+							      NULL,
+							      NULL);
+
+				nsurl_unref(query_url);
+			}
+			free(data);
+		}
+		break;
+'@
+        $OldGetSubmit = $OldGetSubmit -replace "`r`n", "`n"
+        $NewGetSubmit = @'
+	case method_GET:
+		res = form_url_encode(form, success, &data);
+		if (res == NSERROR_OK) {
+			leonos_form_log_text("HTML FORM ENCODE ", data);
+			/* Replace query segment */
+			res = nsurl_replace_query(action_url, data, &query_url);
+			if (res == NSERROR_OK) {
+				leonos_form_log_text("HTML FORM NAVIGATE ",
+						nsurl_access(query_url));
+				res = browser_window_navigate(target,
+							      query_url,
+							      page_url,
+							      BW_NAVIGATE_HISTORY,
+							      NULL,
+							      NULL,
+							      NULL);
+				leonos_form_log_result(
+						"HTML FORM NAVIGATE RESULT ", res);
+
+				nsurl_unref(query_url);
+			} else {
+				leonos_form_log_result(
+						"HTML FORM QUERY URL ERROR ", res);
+			}
+			free(data);
+		} else {
+			leonos_form_log_result("HTML FORM ENCODE ERROR ", res);
+		}
+		break;
+'@
+        $NewGetSubmit = $NewGetSubmit -replace "`r`n", "`n"
+        if (-not $FormText.Contains($OldGetSubmit)) {
+            throw "Could not patch NetSurf GET form submit diagnostics."
+        }
+        $FormText = $FormText.Replace($OldGetSubmit, $NewGetSubmit)
+    }
+    if ($FormText -notmatch 'nsurl_join\(page_url, form->action') {
+        $OldActionCreate = @'
+	/* Decompose action */
+	res = nsurl_create(form->action, &action_url);
+	if (res != NSERROR_OK) {
+		fetch_multipart_data_destroy(success);
+		return res;
+	}
+'@
+        $OldActionCreate = $OldActionCreate -replace "`r`n", "`n"
+        $NewActionCreate = @'
+	/* Decompose action */
+	res = nsurl_create(form->action, &action_url);
+	if (res != NSERROR_OK && page_url != NULL) {
+		res = nsurl_join(page_url, form->action, &action_url);
+	}
+	if (res != NSERROR_OK) {
+		leonos_form_log_result("HTML FORM ACTION URL ERROR ", res);
+		fetch_multipart_data_destroy(success);
+		return res;
+	}
+'@
+        $NewActionCreate = $NewActionCreate -replace "`r`n", "`n"
+        if (-not $FormText.Contains($OldActionCreate)) {
+            throw "Could not patch NetSurf relative form action fallback."
+        }
+        $FormText = $FormText.Replace($OldActionCreate, $NewActionCreate)
+    }
+    [System.IO.File]::WriteAllText($FormSource, $FormText, [System.Text.Encoding]::ASCII)
+
+    $FormsText = [System.IO.File]::ReadAllText($FormsSource) -replace "`r`n", "`n"
+    if ($FormsText -notmatch 'find_or_create_form') {
+        $OldFindForm = @'
+static struct form *
+find_form(struct form *forms, dom_html_form_element *form)
+{
+	while (forms != NULL) {
+		if (forms->node == form)
+			break;
+		forms = forms->prev;
+	}
+
+	return forms;
+}
+'@
+        $OldFindForm = $OldFindForm -replace "`r`n", "`n"
+        $NewFindForm = @'
+static struct form *
+find_form(struct form *forms, dom_html_form_element *form)
+{
+	while (forms != NULL) {
+		if (forms->node == form)
+			break;
+		forms = forms->prev;
+	}
+
+	return forms;
+}
+
+static struct form *
+find_or_create_form(struct form *forms, dom_html_form_element *form)
+{
+	struct form *found;
+	const char *docenc = "UTF-8";
+
+	if (form == NULL) {
+		return NULL;
+	}
+
+	found = find_form(forms, form);
+	if (found != NULL) {
+		return found;
+	}
+
+	if (forms != NULL && forms->document_charset != NULL) {
+		docenc = forms->document_charset;
+	}
+
+	return parse_form_element(docenc, (dom_node *)form);
+}
+'@
+        $NewFindForm = $NewFindForm -replace "`r`n", "`n"
+        if (-not $FormsText.Contains($OldFindForm)) {
+            throw "Could not patch NetSurf dynamic form owner helper."
+        }
+        $FormsText = $FormsText.Replace($OldFindForm, $NewFindForm)
+        $FormsText = $FormsText.Replace(
+            "form_add_control(find_form(forms, form), control);",
+            "form_add_control(find_or_create_form(forms, form), control);")
+    }
+    [System.IO.File]::WriteAllText($FormsSource, $FormsText, [System.Text.Encoding]::ASCII)
 }
 
 function ConvertTo-NetSurfSources {

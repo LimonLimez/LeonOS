@@ -34,6 +34,9 @@ struct jsthread {
 	struct jsheap *heap;
 	JSContext *ctx;
 	html_content *htmlc;
+	const char *active_script_name;
+	unsigned int active_script_dom_appends;
+	bool active_script_dom_budget_hit;
 	bool closed;
 };
 
@@ -81,8 +84,7 @@ static uint32_t qjs_script_interrupt_limit(const jsheap *heap, size_t bytes,
 		limit = timeout * 100u;
 	}
 	if (name != NULL &&
-	    (strstr(name, "ReactLanding.") != NULL ||
-	     strstr(name, "SearchLandingPage.") != NULL) &&
+	    strstr(name, "SearchLandingPage.") != NULL &&
 	    strstr(name, "js.rbxcdn.com/") != NULL &&
 	    limit < timeout * 5000u) {
 		limit = timeout * 5000u;
@@ -1969,6 +1971,43 @@ static void qjs_note_native_node_inserted(JSContext *ctx, dom_node *node)
 	html_leonos_dom_node_inserted(thread->htmlc, node);
 }
 
+static bool qjs_dom_append_budget_exceeded(JSContext *ctx)
+{
+	jsthread *thread = JS_GetContextOpaque(ctx);
+	const char *name;
+
+	if (thread == NULL) {
+		return false;
+	}
+
+	name = thread->active_script_name;
+	if (name == NULL ||
+	    strstr(name, "js.rbxcdn.com/") == NULL ||
+	    strstr(name, "ReactLanding.") == NULL) {
+		return false;
+	}
+
+	thread->active_script_dom_appends += 1u;
+	if (thread->active_script_dom_appends <= 40u) {
+		return false;
+	}
+
+#ifdef LEONOS_USER_APP
+	if (!thread->active_script_dom_budget_hit) {
+		char detail[160];
+		int detail_len = snprintf(detail, sizeof(detail),
+				"NETSURF QUICKJS DOM APPEND BUDGET %s COUNT %u\r\n",
+				name,
+				thread->active_script_dom_appends);
+		if (detail_len > 0) {
+			leonos_write(detail);
+		}
+	}
+#endif
+	thread->active_script_dom_budget_hit = true;
+	return true;
+}
+
 static JSValue qjs_native_append_child(JSContext *ctx, JSValueConst this_val,
 				       int argc, JSValueConst *argv)
 {
@@ -1977,6 +2016,10 @@ static JSValue qjs_native_append_child(JSContext *ctx, JSValueConst this_val,
 	dom_node *result = NULL;
 	if (argc < 1) {
 		return JS_UNDEFINED;
+	}
+	if (qjs_dom_append_budget_exceeded(ctx)) {
+		return JS_ThrowInternalError(ctx,
+				"LeonOS ReactLanding DOM append budget");
 	}
 	child = qjs_get_native_node(argv[0]);
 	qjs_sync_native_subtree_props(ctx, argv[0]);
@@ -2011,6 +2054,10 @@ static JSValue qjs_native_insert_before(JSContext *ctx, JSValueConst this_val,
 	dom_node *result = NULL;
 	if (argc < 1) {
 		return JS_UNDEFINED;
+	}
+	if (qjs_dom_append_budget_exceeded(ctx)) {
+		return JS_ThrowInternalError(ctx,
+				"LeonOS ReactLanding DOM append budget");
 	}
 	child = qjs_get_native_node(argv[0]);
 	if (argc > 1 && !JS_IsNull(argv[1]) && !JS_IsUndefined(argv[1])) {
@@ -2069,6 +2116,10 @@ static JSValue qjs_native_replace_child(JSContext *ctx, JSValueConst this_val,
 	dom_node *result = NULL;
 	if (argc < 2) {
 		return JS_UNDEFINED;
+	}
+	if (qjs_dom_append_budget_exceeded(ctx)) {
+		return JS_ThrowInternalError(ctx,
+				"LeonOS ReactLanding DOM append budget");
 	}
 	new_child = qjs_get_native_node(argv[0]);
 	old_child = qjs_get_native_node(argv[1]);
@@ -4383,12 +4434,18 @@ bool js_exec(jsthread *thread, const uint8_t *txt, size_t txtlen,
 	leonos_write("\r\n");
 #endif
 	qjs_begin_script_interrupt(thread->heap, eval_len, name);
+	thread->active_script_name = name;
+	thread->active_script_dom_appends = 0u;
+	thread->active_script_dom_budget_hit = false;
 	result = JS_Eval(thread->ctx, eval_text, eval_len,
 			 name != NULL ? name : "inline-script",
 			 JS_EVAL_TYPE_GLOBAL);
 	uint32_t interrupt_limit = thread->heap != NULL ?
 		thread->heap->interrupt_limit : 0u;
 	bool interrupted = qjs_end_script_interrupt(thread->heap);
+	thread->active_script_name = NULL;
+	thread->active_script_dom_appends = 0u;
+	thread->active_script_dom_budget_hit = false;
 	if (JS_IsException(result)) {
 #ifdef LEONOS_USER_APP
 		if (interrupted) {
