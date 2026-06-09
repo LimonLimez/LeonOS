@@ -874,7 +874,7 @@ function Ensure-NetSurfLeonOsSourcePatches {
     }
 
     $CssText = [System.IO.File]::ReadAllText($CssSource) -replace "`r`n", "`n"
-    if ($CssText -notmatch 'leonos_css_expand_vars') {
+    if ($CssText -notmatch 'leonos_css_in_prefers_dark_media') {
         if ($CssText -notmatch '#include <stdlib.h>') {
             $OldCssInclude = '#include <stdio.h>'
             $NewCssInclude = @'
@@ -933,6 +933,158 @@ static void leonos_css_vars_free(struct leonos_css_var *vars)
 	free(vars);
 }
 
+static char leonos_css_lower_ascii(char c)
+{
+	if (c >= 'A' && c <= 'Z') {
+		return (char)(c - 'A' + 'a');
+	}
+	return c;
+}
+
+static bool leonos_css_region_starts_ci(const char *start,
+		const char *end,
+		const char *needle)
+{
+	while (*needle != 0) {
+		if (start >= end ||
+		    leonos_css_lower_ascii(*start) !=
+		    leonos_css_lower_ascii(*needle)) {
+			return false;
+		}
+		start++;
+		needle++;
+	}
+
+	return true;
+}
+
+static bool leonos_css_region_contains_ci(const char *start,
+		const char *end,
+		const char *needle)
+{
+	size_t needle_len = strlen(needle);
+	const char *limit;
+	const char *p;
+
+	if (needle_len == 0) {
+		return true;
+	}
+	if ((size_t)(end - start) < needle_len) {
+		return false;
+	}
+
+	limit = end - needle_len;
+	for (p = start; p <= limit; p++) {
+		if (leonos_css_region_starts_ci(p, end, needle)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static bool leonos_css_dark_media_header(const char *at,
+		const char *limit,
+		const char **brace_out)
+{
+	const char *p = at + 1;
+	const char *header_end;
+
+	while (p < limit && leonos_css_space(*p)) {
+		p++;
+	}
+	if (!leonos_css_region_starts_ci(p, limit, "media")) {
+		return false;
+	}
+	p += 5;
+	if (p < limit && leonos_css_name_char(*p)) {
+		return false;
+	}
+
+	header_end = p;
+	while (header_end < limit &&
+	       *header_end != '{' &&
+	       *header_end != ';' &&
+	       *header_end != '}') {
+		header_end++;
+	}
+	if (header_end >= limit || *header_end != '{') {
+		return false;
+	}
+
+	*brace_out = header_end;
+	return leonos_css_region_contains_ci(p, header_end,
+			"prefers-color-scheme") &&
+	       leonos_css_region_contains_ci(p, header_end, "dark");
+}
+
+static bool leonos_css_in_prefers_dark_media(const char *css,
+		const char *pos)
+{
+	const char *p = css;
+	int depth = 0;
+	int dark_depth = -1;
+	bool pending_dark_media = false;
+
+	while (p < pos && *p != 0) {
+		if (p + 1 < pos && p[0] == '/' && p[1] == '*') {
+			p += 2;
+			while (p + 1 < pos &&
+			       !(p[0] == '*' && p[1] == '/')) {
+				p++;
+			}
+			if (p + 1 < pos) {
+				p += 2;
+			}
+			continue;
+		}
+
+		if (*p == '"' || *p == '\'') {
+			char quote = *p++;
+			while (p < pos && *p != 0) {
+				if (*p == '\\' && p + 1 < pos) {
+					p += 2;
+				} else if (*p == quote) {
+					p++;
+					break;
+				} else {
+					p++;
+				}
+			}
+			continue;
+		}
+
+		if (*p == '@') {
+			const char *brace = NULL;
+			if (leonos_css_dark_media_header(p, pos, &brace)) {
+				pending_dark_media = true;
+			}
+		}
+
+		if (*p == '{') {
+			depth++;
+			if (pending_dark_media) {
+				dark_depth = depth;
+				pending_dark_media = false;
+			}
+		} else if (*p == '}') {
+			if (dark_depth == depth) {
+				dark_depth = -1;
+			}
+			if (depth > 0) {
+				depth--;
+			}
+			pending_dark_media = false;
+		} else if (*p == ';') {
+			pending_dark_media = false;
+		}
+
+		p++;
+	}
+
+	return dark_depth >= 0;
+}
+
 static size_t leonos_css_var_collect(const char *css,
 		struct leonos_css_var *vars,
 		size_t max_vars)
@@ -948,6 +1100,11 @@ static size_t leonos_css_var_collect(const char *css,
 		const char *value_end;
 		size_t name_len;
 		size_t value_len;
+
+		if (leonos_css_in_prefers_dark_media(css, p)) {
+			p += 2;
+			continue;
+		}
 
 		while (leonos_css_name_char(*name_end)) {
 			name_end++;
@@ -1237,10 +1394,31 @@ static css_error nscss_process_css_data(struct content_css_data *c,
 }
 '@
         $NewCssProcess = $NewCssProcess -replace "`r`n", "`n"
-        if (-not $CssText.Contains($OldCssProcess)) {
-            throw "Could not patch NetSurf CSS var expansion hook."
+        if ($CssText.Contains($OldCssProcess)) {
+            $CssText = $CssText.Replace($OldCssProcess, $NewCssProcess)
+        } else {
+            $OldLeonOsProcessStart = @'
+#ifdef WITH_LEONOS_FETCHER
+struct leonos_css_var {
+'@
+            $OldLeonOsProcessStart = $OldLeonOsProcessStart -replace "`r`n", "`n"
+            $OldLeonOsProcessEnd = @'
+	return css_stylesheet_append_data(c->sheet,
+			(const uint8_t *) data, size);
+}
+'@
+            $OldLeonOsProcessEnd = $OldLeonOsProcessEnd -replace "`r`n", "`n"
+            $OldLeonOsStart = $CssText.IndexOf($OldLeonOsProcessStart)
+            $OldLeonOsEnd = -1
+            if ($OldLeonOsStart -ge 0) {
+                $OldLeonOsEnd = $CssText.IndexOf($OldLeonOsProcessEnd, $OldLeonOsStart)
+            }
+            if ($OldLeonOsStart -lt 0 -or $OldLeonOsEnd -lt 0) {
+                throw "Could not patch NetSurf CSS var expansion hook."
+            }
+            $OldLeonOsEnd += $OldLeonOsProcessEnd.Length
+            $CssText = $CssText.Substring(0, $OldLeonOsStart) + $NewCssProcess + $CssText.Substring($OldLeonOsEnd)
         }
-        $CssText = $CssText.Replace($OldCssProcess, $NewCssProcess)
         [System.IO.File]::WriteAllText($CssSource, $CssText, [System.Text.Encoding]::ASCII)
     }
 
