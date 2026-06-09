@@ -621,12 +621,16 @@ function Ensure-NetSurfDuktapeGeneratedFiles {
 function Ensure-NetSurfLeonOsSourcePatches {
     $NetSurfRoot = Join-Path $VendorPath "netsurf"
     $FetchSource = Join-Path $NetSurfRoot "content\fetch.c"
+    $ScriptSource = Join-Path $NetSurfRoot "content\handlers\html\script.c"
     $PlotSource = Join-Path $NetSurfRoot "frontends\monkey\plot.c"
     $BrowserSource = Join-Path $NetSurfRoot "frontends\monkey\browser.c"
     $BrowserHeader = Join-Path $NetSurfRoot "frontends\monkey\browser.h"
 
     if (-not (Test-Path -LiteralPath $FetchSource)) {
         throw "NetSurf fetch source missing at $FetchSource."
+    }
+    if (-not (Test-Path -LiteralPath $ScriptSource)) {
+        throw "NetSurf script source missing at $ScriptSource."
     }
     if (-not (Test-Path -LiteralPath $PlotSource)) {
         throw "NetSurf monkey plot source missing at $PlotSource."
@@ -681,6 +685,226 @@ nserror leonos_fetcher_register(void);
         }
         $FetchText = $FetchText.Replace($OldRegister, $NewRegister)
         [System.IO.File]::WriteAllText($FetchSource, $FetchText, [System.Text.Encoding]::ASCII)
+    }
+
+    $ScriptText = [System.IO.File]::ReadAllText($ScriptSource) -replace "`r`n", "`n"
+    if ($ScriptText -notmatch 'leonos_script_async_blocks_later') {
+        $OldHandler = @'
+static script_handler_t *select_script_handler(content_type ctype)
+{
+	if (ctype == CONTENT_JS) {
+		return js_exec;
+	}
+	return NULL;
+}
+
+
+/* exported internal interface documented in html/html_internal.h */
+'@
+        $OldHandler = $OldHandler -replace "`r`n", "`n"
+        $NewHandler = @'
+static script_handler_t *select_script_handler(content_type ctype)
+{
+	if (ctype == CONTENT_JS) {
+		return js_exec;
+	}
+	return NULL;
+}
+
+#ifdef WITH_LEONOS_FETCHER
+static bool leonos_script_async_blocks_later(hlcache_handle *script)
+{
+	const char *url;
+
+	if (script == NULL) {
+		return false;
+	}
+
+	url = nsurl_access(hlcache_handle_get_url(script));
+	return url != NULL &&
+	       strstr(url, "js.rbxcdn.com/") != NULL &&
+	       (strstr(url, "c27f57f4a397dabc2fe3b74fec93c2401913bdf49373f9339c00b6f18b32d2ac") != NULL ||
+	        strstr(url, "63b59480fef503ff6648900d1051bae7531757a38ce24f77587552fca279d16c") != NULL ||
+	        strstr(url, "ReactUtilities.") != NULL ||
+	        strstr(url, "ReactStyleGuide.") != NULL);
+}
+#endif
+
+
+/* exported internal interface documented in html/html_internal.h */
+'@
+        $NewHandler = $NewHandler -replace "`r`n", "`n"
+        if (-not $ScriptText.Contains($OldHandler)) {
+            throw "Could not patch NetSurf async script order helper."
+        }
+        $ScriptText = $ScriptText.Replace($OldHandler, $NewHandler)
+
+        $OldExec = @'
+			/* ensure script content is present */
+			if (s->data.handle == NULL)
+				continue;
+
+			/* ensure script content fetch status is not an error */
+			if (content_get_status(s->data.handle) ==
+					CONTENT_STATUS_ERROR)
+				continue;
+
+			/* ensure script handler for content type */
+			script_handler = select_script_handler(
+					content_get_type(s->data.handle));
+			if (script_handler == NULL)
+				continue; /* unsupported type */
+
+			if (content_get_status(s->data.handle) ==
+					CONTENT_STATUS_DONE) {
+				/* external script is now available */
+				const uint8_t *data;
+				size_t size;
+				data = content_get_source_data(
+						s->data.handle, &size );
+				script_handler(c->jsthread, data, size,
+					       nsurl_access(hlcache_handle_get_url(s->data.handle)));
+				have_run_something = true;
+				/* We have to re-acquire this here since the
+				 * c->scripts array may have been reallocated
+				 * as a result of executing this script.
+				 */
+				s = &(c->scripts[i]);
+
+				s->already_started = true;
+
+			}
+'@
+        $OldExec = $OldExec -replace "`r`n", "`n"
+        $NewExec = @'
+			/* ensure script content is present */
+			if (s->data.handle == NULL) {
+				continue;
+			}
+
+#ifdef WITH_LEONOS_FETCHER
+			if (s->type == HTML_SCRIPT_ASYNC &&
+			    leonos_script_async_blocks_later(s->data.handle) &&
+			    content_get_status(s->data.handle) !=
+					CONTENT_STATUS_DONE) {
+				break;
+			}
+#endif
+
+			/* ensure script content fetch status is not an error */
+			if (content_get_status(s->data.handle) ==
+					CONTENT_STATUS_ERROR)
+				continue;
+
+			if (content_get_status(s->data.handle) !=
+					CONTENT_STATUS_DONE) {
+				continue;
+			}
+
+			/* ensure script handler for content type */
+			script_handler = select_script_handler(
+					content_get_type(s->data.handle));
+			if (script_handler == NULL)
+				continue; /* unsupported type */
+
+			/* external script is now available */
+			const uint8_t *data;
+			size_t size;
+			data = content_get_source_data(
+					s->data.handle, &size );
+			script_handler(c->jsthread, data, size,
+				       nsurl_access(hlcache_handle_get_url(s->data.handle)));
+			have_run_something = true;
+			/* We have to re-acquire this here since the
+			 * c->scripts array may have been reallocated
+			 * as a result of executing this script.
+			 */
+			s = &(c->scripts[i]);
+
+			s->already_started = true;
+'@
+        $NewExec = $NewExec -replace "`r`n", "`n"
+        if (-not $ScriptText.Contains($OldExec)) {
+            throw "Could not patch NetSurf async script order execution."
+        }
+        $ScriptText = $ScriptText.Replace($OldExec, $NewExec)
+        [System.IO.File]::WriteAllText($ScriptSource, $ScriptText, [System.Text.Encoding]::ASCII)
+    }
+
+    $OldCriticalAsyncGate = @'
+			/* ensure script content fetch status is not an error */
+			if (content_get_status(s->data.handle) ==
+					CONTENT_STATUS_ERROR)
+				continue;
+
+			if (content_get_status(s->data.handle) !=
+					CONTENT_STATUS_DONE) {
+#ifdef WITH_LEONOS_FETCHER
+				if (s->type == HTML_SCRIPT_ASYNC &&
+				    leonos_script_async_blocks_later(s->data.handle)) {
+					break;
+				}
+#endif
+				continue;
+			}
+'@
+    $OldCriticalAsyncGate = $OldCriticalAsyncGate -replace "`r`n", "`n"
+    $NewCriticalAsyncGate = @'
+#ifdef WITH_LEONOS_FETCHER
+			if (s->type == HTML_SCRIPT_ASYNC &&
+			    leonos_script_async_blocks_later(s->data.handle) &&
+			    content_get_status(s->data.handle) !=
+					CONTENT_STATUS_DONE) {
+				break;
+			}
+#endif
+
+			/* ensure script content fetch status is not an error */
+			if (content_get_status(s->data.handle) ==
+					CONTENT_STATUS_ERROR)
+				continue;
+
+			if (content_get_status(s->data.handle) !=
+					CONTENT_STATUS_DONE) {
+				continue;
+			}
+'@
+    $NewCriticalAsyncGate = $NewCriticalAsyncGate -replace "`r`n", "`n"
+    if ($ScriptText.Contains($OldCriticalAsyncGate)) {
+        $ScriptText = $ScriptText.Replace($OldCriticalAsyncGate, $NewCriticalAsyncGate)
+        [System.IO.File]::WriteAllText($ScriptSource, $ScriptText, [System.Text.Encoding]::ASCII)
+    }
+
+    if ($ScriptText -notmatch '!allow_defer &&') {
+        $OldDeferGate = @'
+		if (s->already_started) {
+			continue;
+		}
+
+		if (s->type == HTML_SCRIPT_DEFER && allow_defer) {
+'@
+        $OldDeferGate = $OldDeferGate -replace "`r`n", "`n"
+        $NewDeferGate = @'
+		if (s->already_started) {
+			continue;
+		}
+
+#ifdef WITH_LEONOS_FETCHER
+		if (!allow_defer &&
+		    s->type == HTML_SCRIPT_DEFER &&
+		    leonos_script_async_blocks_later(s->data.handle)) {
+			break;
+		}
+#endif
+
+		if (s->type == HTML_SCRIPT_DEFER && allow_defer) {
+'@
+        $NewDeferGate = $NewDeferGate -replace "`r`n", "`n"
+        if (-not $ScriptText.Contains($OldDeferGate)) {
+            throw "Could not patch NetSurf deferred script async gate."
+        }
+        $ScriptText = $ScriptText.Replace($OldDeferGate, $NewDeferGate)
+        [System.IO.File]::WriteAllText($ScriptSource, $ScriptText, [System.Text.Encoding]::ASCII)
     }
 
     $PlotText = [System.IO.File]::ReadAllText($PlotSource) -replace "`r`n", "`n"

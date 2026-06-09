@@ -314,6 +314,12 @@ static bool leonos_fetch_can_fetch(const nsurl *url)
 static const char *leonos_fetch_mime_from_url(const char *url)
 {
     size_t len = strlen(url);
+    for (size_t i = 0u; i < len; i += 1u) {
+        if (url[i] == '?' || url[i] == '#') {
+            len = i;
+            break;
+        }
+    }
 
     if (len >= 4 && strncmp(url + len - 4, ".css", 4) == 0) {
         return "text/css";
@@ -336,6 +342,12 @@ static const char *leonos_fetch_mime_from_url(const char *url)
     }
     if (len >= 4 && strncmp(url + len - 4, ".png", 4) == 0) {
         return "image/png";
+    }
+    if (len >= 4 && strncmp(url + len - 4, ".svg", 4) == 0) {
+        return "image/svg+xml";
+    }
+    if (len >= 5 && strncmp(url + len - 5, ".webp", 5) == 0) {
+        return "image/webp";
     }
 
     return "text/html; charset=utf-8";
@@ -631,13 +643,8 @@ static bool leonos_fetch_url_is_roblox_deferred_media(const char *url)
         }
     }
     return (len >= 4u && strncmp(url + len - 4u, ".ico", 4) == 0) ||
-           (len >= 4u && strncmp(url + len - 4u, ".png", 4) == 0) ||
-           (len >= 4u && strncmp(url + len - 4u, ".gif", 4) == 0) ||
-           (len >= 4u && strncmp(url + len - 4u, ".jpg", 4) == 0) ||
-           (len >= 5u && strncmp(url + len - 5u, ".jpeg", 5) == 0) ||
-           (len >= 5u && strncmp(url + len - 5u, ".webp", 5) == 0) ||
-           strstr(url, "images.rbxcdn.com/") != NULL ||
-           strstr(url, "tr.rbxcdn.com/") != NULL;
+           strstr(url, "tr.rbxcdn.com/") != NULL ||
+           strstr(url, "vignette") != NULL;
 }
 
 static void leonos_fetch_reset_roblox_dependencies(void)
@@ -740,9 +747,13 @@ static bool leonos_fetch_url_looks_subresource(const char *url)
            (len >= 5u && strncmp(url + len - 5u, ".jpeg", 5) == 0) ||
            (len >= 4u && strncmp(url + len - 4u, ".gif", 4) == 0) ||
            (len >= 4u && strncmp(url + len - 4u, ".ico", 4) == 0) ||
+           (len >= 4u && strncmp(url + len - 4u, ".svg", 4) == 0) ||
+           (len >= 5u && strncmp(url + len - 5u, ".webp", 5) == 0) ||
            strstr(url, "/css/") != NULL ||
            strstr(url, "/js/") != NULL ||
-           strstr(url, "/images/") != NULL;
+           strstr(url, "/images/") != NULL ||
+           strstr(url, "images.rbxcdn.com/") != NULL ||
+           strstr(url, "tr.rbxcdn.com/") != NULL;
 }
 
 static void leonos_fetch_send_callback(const fetch_msg *msg,
