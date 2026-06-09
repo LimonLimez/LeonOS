@@ -50,6 +50,7 @@ struct leonos_fetch_context {
     bool data_log_started;
     bool locked;
     bool synthetic_empty;
+    bool dependency_wait_logged;
     unsigned int open_retries;
     unsigned int order;
     bool open_wait_logged;
@@ -74,6 +75,12 @@ static unsigned int leonos_fetch_css_count;
 static unsigned int leonos_fetch_js_count;
 static unsigned int leonos_fetch_js_completion_cooldown;
 static unsigned int leonos_fetch_next_order;
+static bool leonos_fetch_roblox_react_core_delivered;
+static bool leonos_fetch_roblox_react_shared_delivered;
+static bool leonos_fetch_roblox_react_utilities_seen;
+static bool leonos_fetch_roblox_react_utilities_delivered;
+static bool leonos_fetch_roblox_react_styleguide_seen;
+static bool leonos_fetch_roblox_react_styleguide_delivered;
 
 #ifdef LEONOS_USER_APP
 static void leonos_fetch_copy_meta(struct leonos_fetch_context *ctx,
@@ -381,6 +388,7 @@ static bool leonos_fetch_url_is_roblox_deferred_bundle(const char *url)
            strstr(url, "UserProfiles.") != NULL ||
            strstr(url, "Navigation.") != NULL ||
            strstr(url, "Sentry.") != NULL ||
+           strstr(url, "f85ce090699c1c3962762b8a2f8b252f0f2a7d0424c146f41d6c5abbf0147a57") != NULL ||
            strstr(url, "Thumbnails.") != NULL ||
            strstr(url, "PresenceStatus.") != NULL ||
            strstr(url, "RealTime.") != NULL ||
@@ -561,14 +569,28 @@ static bool leonos_fetch_url_is_roblox_react_shared_script(const char *url)
            strstr(url, "63b59480fef503ff6648900d1051bae7531757a38ce24f77587552fca279d16c") != NULL;
 }
 
+static bool leonos_fetch_url_is_roblox_react_utilities_script(const char *url)
+{
+    return url != NULL &&
+           strstr(url, "js.rbxcdn.com/") != NULL &&
+           strstr(url, "ReactUtilities.") != NULL;
+}
+
+static bool leonos_fetch_url_is_roblox_react_styleguide_script(const char *url)
+{
+    return url != NULL &&
+           strstr(url, "js.rbxcdn.com/") != NULL &&
+           strstr(url, "ReactStyleGuide.") != NULL;
+}
+
 static bool leonos_fetch_url_is_roblox_post_react_dependency_script(const char *url)
 {
     if (url == NULL || strstr(url, "js.rbxcdn.com/") == NULL) {
         return false;
     }
 
-    return strstr(url, "ReactUtilities.") != NULL ||
-           strstr(url, "ReactStyleGuide.") != NULL;
+    return leonos_fetch_url_is_roblox_react_utilities_script(url) ||
+           leonos_fetch_url_is_roblox_react_styleguide_script(url);
 }
 
 static bool leonos_fetch_url_is_roblox_landing_dependency_script(const char *url)
@@ -616,6 +638,86 @@ static bool leonos_fetch_url_is_roblox_deferred_media(const char *url)
            (len >= 5u && strncmp(url + len - 5u, ".webp", 5) == 0) ||
            strstr(url, "images.rbxcdn.com/") != NULL ||
            strstr(url, "tr.rbxcdn.com/") != NULL;
+}
+
+static void leonos_fetch_reset_roblox_dependencies(void)
+{
+    leonos_fetch_roblox_react_core_delivered = false;
+    leonos_fetch_roblox_react_shared_delivered = false;
+    leonos_fetch_roblox_react_utilities_seen = false;
+    leonos_fetch_roblox_react_utilities_delivered = false;
+    leonos_fetch_roblox_react_styleguide_seen = false;
+    leonos_fetch_roblox_react_styleguide_delivered = false;
+}
+
+static void leonos_fetch_note_roblox_script_seen(const char *url)
+{
+    if (leonos_fetch_url_is_roblox_react_utilities_script(url)) {
+        leonos_fetch_roblox_react_utilities_seen = true;
+    }
+    if (leonos_fetch_url_is_roblox_react_styleguide_script(url)) {
+        leonos_fetch_roblox_react_styleguide_seen = true;
+    }
+}
+
+static bool leonos_fetch_roblox_delivery_dependencies_ready(const char *url)
+{
+    if (leonos_fetch_url_is_roblox_react_shared_script(url)) {
+        return leonos_fetch_roblox_react_core_delivered;
+    }
+    if (leonos_fetch_url_is_roblox_post_react_dependency_script(url)) {
+        return leonos_fetch_roblox_react_shared_delivered;
+    }
+    if (leonos_fetch_url_is_roblox_landing_route_script(url)) {
+        if (!leonos_fetch_roblox_react_shared_delivered) {
+            return false;
+        }
+        if (leonos_fetch_roblox_react_utilities_seen &&
+            !leonos_fetch_roblox_react_utilities_delivered) {
+            return false;
+        }
+        if (leonos_fetch_roblox_react_styleguide_seen &&
+            !leonos_fetch_roblox_react_styleguide_delivered) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool leonos_fetch_waiting_for_delivery_dependency(
+        struct leonos_fetch_context *ctx)
+{
+    const char *url = nsurl_access(ctx->url);
+
+    if (leonos_fetch_roblox_delivery_dependencies_ready(url)) {
+        return false;
+    }
+
+    if (!ctx->dependency_wait_logged) {
+        ctx->dependency_wait_logged = true;
+        leonos_fetch_log("NETSURF LEO HTTPS delivery dependency wait ");
+        leonos_fetch_log(url);
+        leonos_fetch_log("\r\n");
+    }
+    (void) leonos_yield();
+    return true;
+}
+
+static void leonos_fetch_note_roblox_script_delivered(const char *url)
+{
+    if (leonos_fetch_url_is_roblox_react_core_script(url)) {
+        leonos_fetch_roblox_react_core_delivered = true;
+        leonos_fetch_log("NETSURF LEO HTTPS dependency delivered react-core\r\n");
+    } else if (leonos_fetch_url_is_roblox_react_shared_script(url)) {
+        leonos_fetch_roblox_react_shared_delivered = true;
+        leonos_fetch_log("NETSURF LEO HTTPS dependency delivered react-shared\r\n");
+    } else if (leonos_fetch_url_is_roblox_react_utilities_script(url)) {
+        leonos_fetch_roblox_react_utilities_delivered = true;
+        leonos_fetch_log("NETSURF LEO HTTPS dependency delivered react-utilities\r\n");
+    } else if (leonos_fetch_url_is_roblox_react_styleguide_script(url)) {
+        leonos_fetch_roblox_react_styleguide_delivered = true;
+        leonos_fetch_log("NETSURF LEO HTTPS dependency delivered react-styleguide\r\n");
+    }
 }
 
 static bool leonos_fetch_url_looks_subresource(const char *url)
@@ -955,6 +1057,7 @@ static void leonos_fetch_send_finished(struct leonos_fetch_context *ctx)
     if (!ctx->aborted) {
         msg.type = FETCH_FINISHED;
         leonos_fetch_send_callback(&msg, ctx);
+        leonos_fetch_note_roblox_script_delivered(nsurl_access(ctx->url));
 #ifdef LEONOS_USER_APP
         leonos_netsurf_fetch_finished_for_script = 1;
 #endif
@@ -1051,6 +1154,7 @@ static void *leonos_fetch_setup(struct fetch *parent_fetch, nsurl *url,
         leonos_fetch_css_count = 0u;
         leonos_fetch_js_count = 0u;
         leonos_fetch_next_order = 1u;
+        leonos_fetch_reset_roblox_dependencies();
     } else if (leonos_fetch_url_looks_css(nsurl_access(url))) {
         leonos_fetch_css_count += 1u;
         if (leonos_fetch_url_is_roblox_deferred_style(nsurl_access(url)) ||
@@ -1074,6 +1178,7 @@ static void *leonos_fetch_setup(struct fetch *parent_fetch, nsurl *url,
             (void) snprintf(ctx->content_type, sizeof(ctx->content_type),
                     "application/javascript");
         }
+        leonos_fetch_note_roblox_script_seen(nsurl_access(url));
     } else if (leonos_fetch_url_is_roblox_deferred_media(nsurl_access(url))) {
         const char *media_type = leonos_fetch_mime_from_url(nsurl_access(url));
         if (strncmp(media_type, "text/html", 9) == 0) {
@@ -1190,10 +1295,16 @@ static bool leonos_fetch_process(struct leonos_fetch_context *ctx)
     }
 
     if (!ctx->headers_sent) {
+        if (leonos_fetch_waiting_for_delivery_dependency(ctx)) {
+            return false;
+        }
         leonos_fetch_finish_buffered_body(ctx);
         return true;
     }
 
+    if (leonos_fetch_waiting_for_delivery_dependency(ctx)) {
+        return false;
+    }
     if (!ctx->aborted) {
         leonos_fetch_log("NETSURF LEO HTTPS fetch data callbacks done\r\n");
     }

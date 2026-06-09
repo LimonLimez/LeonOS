@@ -2063,12 +2063,15 @@ struct qjs_simple_selector {
 	char class_name[96];
 	char attr[64];
 	char attr_value[128];
+	char not_attr[64];
 	bool has_tag;
 	bool has_id;
 	bool has_class;
 	bool has_attr;
+	bool has_not_attr;
 	bool attr_has_value;
 	bool attr_dash_match;
+	bool attr_prefix_match;
 	bool unsupported;
 };
 
@@ -2145,9 +2148,30 @@ static bool qjs_parse_selector_part(const char *text,
 		selector->unsupported = true;
 		return false;
 	}
+	unsigned int bracket_depth = 0u;
+	char guard_quote = 0;
 	for (i = start; i < end; i++) {
-		if (text[i] == '>' || text[i] == '+' || text[i] == '~' ||
-		    qjs_ascii_space(text[i])) {
+		if (guard_quote != 0) {
+			if (text[i] == guard_quote) {
+				guard_quote = 0;
+			}
+			continue;
+		}
+		if (text[i] == '\'' || text[i] == '"') {
+			guard_quote = text[i];
+			continue;
+		}
+		if (text[i] == '[') {
+			bracket_depth += 1u;
+			continue;
+		}
+		if (text[i] == ']' && bracket_depth != 0u) {
+			bracket_depth -= 1u;
+			continue;
+		}
+		if (bracket_depth == 0u &&
+		    (text[i] == '>' || text[i] == '+' ||
+		     text[i] == '~' || qjs_ascii_space(text[i]))) {
 			selector->unsupported = true;
 			return false;
 		}
@@ -2191,6 +2215,7 @@ static bool qjs_parse_selector_part(const char *text,
 			size_t attr_start;
 			size_t value_start;
 			char quote = 0;
+			char attr_operator = 0;
 			i += 1u;
 			while (i < end && qjs_ascii_space(text[i])) {
 				i += 1u;
@@ -2212,9 +2237,11 @@ static bool qjs_parse_selector_part(const char *text,
 			if (i < end && text[i] != ']') {
 				if (text[i] == '|') {
 					selector->attr_dash_match = true;
+					attr_operator = text[i];
 					i += 1u;
 				} else if (text[i] == '~' || text[i] == '^' ||
 					   text[i] == '$' || text[i] == '*') {
+					attr_operator = text[i];
 					i += 1u;
 				}
 				if (i < end && text[i] == '=') {
@@ -2236,6 +2263,7 @@ static bool qjs_parse_selector_part(const char *text,
 					sizeof(selector->attr_value),
 					text, value_start, i);
 				selector->attr_has_value = true;
+				selector->attr_prefix_match = attr_operator == '^';
 				if (quote != 0 && i < end && text[i] == quote) {
 					i += 1u;
 				}
@@ -2246,6 +2274,47 @@ static bool qjs_parse_selector_part(const char *text,
 			if (i < end && text[i] == ']') {
 				i += 1u;
 			}
+		} else if (text[i] == ':' && i + 5u < end &&
+			   strncmp(text + i, ":not(", 5u) == 0) {
+			size_t attr_start;
+			i += 5u;
+			while (i < end && qjs_ascii_space(text[i])) {
+				i += 1u;
+			}
+			if (i >= end || text[i] != '[') {
+				selector->unsupported = true;
+				return false;
+			}
+			i += 1u;
+			while (i < end && qjs_ascii_space(text[i])) {
+				i += 1u;
+			}
+			attr_start = i;
+			while (i < end && text[i] != ']' &&
+			       !qjs_ascii_space(text[i]) &&
+			       text[i] != '=' && text[i] != '|' &&
+			       text[i] != '~' && text[i] != '^' &&
+			       text[i] != '$' && text[i] != '*') {
+				i += 1u;
+			}
+			qjs_copy_selector_text(selector->not_attr,
+					       sizeof(selector->not_attr),
+					       text, attr_start, i);
+			selector->has_not_attr = selector->not_attr[0] != 0;
+			while (i < end && text[i] != ']') {
+				i += 1u;
+			}
+			if (i < end && text[i] == ']') {
+				i += 1u;
+			}
+			while (i < end && qjs_ascii_space(text[i])) {
+				i += 1u;
+			}
+			if (i >= end || text[i] != ')') {
+				selector->unsupported = true;
+				return false;
+			}
+			i += 1u;
 		} else {
 			selector->unsupported = true;
 			return false;
@@ -2261,13 +2330,39 @@ static bool qjs_parse_selector_chain(const char *text,
 	size_t start = 0u;
 	size_t end = 0u;
 	size_t part_start;
+	unsigned int bracket_depth = 0u;
+	char quote = 0;
 	memset(chain, 0, sizeof(*chain));
 	while (start < len && qjs_ascii_space(text[start])) {
 		start += 1u;
 	}
 	end = start;
-	while (end < len && text[end] != ',') {
-		if (text[end] == '>' || text[end] == '+' || text[end] == '~') {
+	while (end < len &&
+	       (text[end] != ',' || bracket_depth != 0u || quote != 0)) {
+		if (quote != 0) {
+			if (text[end] == quote) {
+				quote = 0;
+			}
+			end += 1u;
+			continue;
+		}
+		if (text[end] == '\'' || text[end] == '"') {
+			quote = text[end++];
+			continue;
+		}
+		if (text[end] == '[') {
+			bracket_depth += 1u;
+			end += 1u;
+			continue;
+		}
+		if (text[end] == ']' && bracket_depth != 0u) {
+			bracket_depth -= 1u;
+			end += 1u;
+			continue;
+		}
+		if (bracket_depth == 0u &&
+		    (text[end] == '>' || text[end] == '+' ||
+		     text[end] == '~')) {
 			chain->unsupported = true;
 			return false;
 		}
@@ -2285,7 +2380,33 @@ static bool qjs_parse_selector_chain(const char *text,
 			start += 1u;
 		}
 		part_start = start;
-		while (start < end && !qjs_ascii_space(text[start])) {
+		bracket_depth = 0u;
+		quote = 0;
+		while (start < end) {
+			if (quote != 0) {
+				if (text[start] == quote) {
+					quote = 0;
+				}
+				start += 1u;
+				continue;
+			}
+			if (text[start] == '\'' || text[start] == '"') {
+				quote = text[start++];
+				continue;
+			}
+			if (text[start] == '[') {
+				bracket_depth += 1u;
+				start += 1u;
+				continue;
+			}
+			if (text[start] == ']' && bracket_depth != 0u) {
+				bracket_depth -= 1u;
+				start += 1u;
+				continue;
+			}
+			if (bracket_depth == 0u && qjs_ascii_space(text[start])) {
+				break;
+			}
 			start += 1u;
 		}
 		if (part_start == start) {
@@ -2366,6 +2487,10 @@ static bool qjs_dom_attr_matches(dom_string *value,
 	    memcmp(dom_string_data(value), selector->attr_value, wanted_len) == 0) {
 		return true;
 	}
+	if (selector->attr_prefix_match && value_len >= wanted_len &&
+	    memcmp(dom_string_data(value), selector->attr_value, wanted_len) == 0) {
+		return true;
+	}
 	if (selector->attr_dash_match && value_len > wanted_len &&
 	    memcmp(dom_string_data(value), selector->attr_value, wanted_len) == 0 &&
 	    dom_string_data(value)[wanted_len] == '-') {
@@ -2404,6 +2529,14 @@ static bool qjs_dom_element_matches(dom_element *element,
 	if (matched && selector->has_attr) {
 		qjs_read_dom_attribute(element, selector->attr, &attr);
 		matched = qjs_dom_attr_matches(attr, selector);
+	}
+	if (matched && selector->has_not_attr) {
+		dom_string *not_attr = NULL;
+		qjs_read_dom_attribute(element, selector->not_attr, &not_attr);
+		matched = not_attr == NULL;
+		if (not_attr != NULL) {
+			dom_string_unref(not_attr);
+		}
 	}
 	if (tag != NULL) {
 		dom_string_unref(tag);
