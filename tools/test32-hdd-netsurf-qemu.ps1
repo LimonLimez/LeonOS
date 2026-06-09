@@ -4,6 +4,8 @@ param(
     [int] $TimeoutSeconds = 360,
     [string] $StartUrl = "https://www.google.com/?igu=1&hl=en&gbv=1",
     [switch] $RequireSubresource,
+    [switch] $AllowNoDomReflow,
+    [switch] $AllowTextOnlyPaint,
     [switch] $LiveSerial,
     [switch] $SkipBuild
 )
@@ -103,6 +105,7 @@ try {
     $SawRedrawAfterFetch = $false
     $SawImageDecoded = $false
     $SawBitmapPlot = $false
+    $SawTextPlot = $false
     $SawDomReflow = $false
     $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $Deadline -and -not $Process.HasExited) {
@@ -126,12 +129,18 @@ try {
         if ($Text.Contains("PLOT BITMAP X ")) {
             $SawBitmapPlot = $true
         }
+        if ($Text.Contains("PLOT TEXT X ")) {
+            $SawTextPlot = $true
+        }
         if ($Text.Contains("HTML LEONOS DOM REBUILD REFLOW") -or
             $Text.Contains("HTML LEONOS DOM MUTATION REFLOW")) {
             $SawDomReflow = $true
         }
+        $SawRequiredPaint = $SawBitmapPlot -or ($AllowTextOnlyPaint -and $SawTextPlot)
+        $SawRequiredImage = $SawImageDecoded -or $AllowTextOnlyPaint
+        $SawRequiredReflow = $SawDomReflow -or $AllowNoDomReflow
         if ($SawFetchBytes -and $SawFetchFinished -and $SawRedrawAfterFetch -and
-            $SawImageDecoded -and $SawBitmapPlot -and $SawDomReflow) {
+            $SawRequiredImage -and $SawRequiredPaint -and $SawRequiredReflow) {
             break
         }
         Start-Sleep -Milliseconds 100
@@ -189,16 +198,24 @@ try {
         "WINDOW REDRAW WIN 0 START",
         "PLOT CLIP X0 0 Y0 0 X1 ",
         "PLOT RECT X0 ",
-        "PLOT BITMAP X ",
         "WINDOW REDRAW WIN 0 STOP",
-        "NETSURF QUICKJS EXEC ?inline script?",
-        "GENERIC LEONOS STB IMAGE DECODED"
+        "NETSURF QUICKJS EXEC ?inline script?"
     )) {
         if ($Stdout -notlike "*$Expected*") {
             throw "QEMU did not emit expected serial line: $Expected"
         }
     }
-    if (-not ($Stdout.Contains("HTML LEONOS DOM REBUILD REFLOW") -or
+    if ($Stdout -notlike "*GENERIC LEONOS STB IMAGE DECODED*" -and
+        -not $AllowTextOnlyPaint) {
+        throw "QEMU did not emit expected serial line: GENERIC LEONOS STB IMAGE DECODED"
+    }
+    if ($Stdout -notlike "*PLOT BITMAP X *") {
+        if (-not $AllowTextOnlyPaint -or $Stdout -notlike "*PLOT TEXT X *") {
+            throw "QEMU did not emit expected serial line: PLOT BITMAP X "
+        }
+    }
+    if (-not $AllowNoDomReflow -and
+        -not ($Stdout.Contains("HTML LEONOS DOM REBUILD REFLOW") -or
               $Stdout.Contains("HTML LEONOS DOM MUTATION REFLOW"))) {
         throw "QEMU did not emit an expected LeonOS DOM reflow line."
     }
