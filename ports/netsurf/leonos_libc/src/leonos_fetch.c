@@ -401,6 +401,8 @@ static bool leonos_fetch_url_is_roblox_deferred_bundle(const char *url)
            strstr(url, "Navigation.") != NULL ||
            strstr(url, "Sentry.") != NULL ||
            strstr(url, "SearchLandingPage.") != NULL ||
+           strstr(url, "AngularJsUtilities.") != NULL ||
+           strstr(url, "3756ad214dde52cb58a1300177547475") != NULL ||
            strstr(url, "f85ce090699c1c3962762b8a2f8b252f0f2a7d0424c146f41d6c5abbf0147a57") != NULL ||
            strstr(url, "Thumbnails.") != NULL ||
            strstr(url, "PresenceStatus.") != NULL ||

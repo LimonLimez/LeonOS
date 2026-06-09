@@ -146,6 +146,8 @@ static bool qjs_should_skip_blocking_script(const char *name,
 	     strstr(name, "Navigation.js") != NULL ||
 	     strstr(name, "Sentry.js") != NULL ||
 	     strstr(name, "SearchLandingPage.js") != NULL ||
+	     strstr(name, "AngularJsUtilities.js") != NULL ||
+	     strstr(name, "3756ad214dde52cb58a1300177547475") != NULL ||
 	     strstr(name, "63b59480fef503ff6648900d1051bae7531757a38ce24f77587552fca279d16c") != NULL ||
 	     strstr(name, "CoreUtilities.js") != NULL ||
 	     strstr(name, "ReactStyleGuide.js") != NULL ||
@@ -175,6 +177,8 @@ static bool qjs_should_skip_blocking_script(const char *name,
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"Navigation\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"Sentry\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"SearchLandingPage\")") ||
+	       qjs_mem_contains(source, bytes, "bundleDetected('angular')") ||
+	       qjs_mem_contains(source, bytes, "bundleDetected(\"AngularJsUtilities\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"WebBlox\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"CoreUtilities\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"ReactStyleGuide\")") ||
@@ -211,6 +215,32 @@ static void qjs_log(const char *text)
 #endif
 }
 
+static void qjs_log_js_error_stack(JSContext *ctx, JSValueConst value)
+{
+	JSValue stack = JS_GetPropertyStr(ctx, value, "stack");
+	const char *stack_text = JS_ToCString(ctx, stack);
+	if (stack_text != NULL && stack_text[0] != 0) {
+		char preview[513];
+		size_t i = 0u;
+		for (; stack_text[i] != 0 && i + 1u < sizeof(preview); i++) {
+			char ch = stack_text[i];
+			if (ch == '\r' || ch == '\n' || ch == '\t') {
+				ch = ' ';
+			}
+			if ((unsigned char) ch < 32u ||
+			    (unsigned char) ch > 126u) {
+				ch = '.';
+			}
+			preview[i] = ch;
+		}
+		preview[i] = 0;
+		qjs_log("NETSURF QUICKJS CONSOLE STACK");
+		qjs_log(preview);
+	}
+	JS_FreeCString(ctx, stack_text);
+	JS_FreeValue(ctx, stack);
+}
+
 static JSValue qjs_console_log(JSContext *ctx, JSValueConst this_val,
 			       int argc, JSValueConst *argv)
 {
@@ -220,6 +250,9 @@ static JSValue qjs_console_log(JSContext *ctx, JSValueConst this_val,
 		if (text != NULL) {
 			qjs_log(text);
 			JS_FreeCString(ctx, text);
+		}
+		if (JS_IsObject(argv[i])) {
+			qjs_log_js_error_stack(ctx, argv[i]);
 		}
 	}
 	return JS_UNDEFINED;
@@ -1404,6 +1437,20 @@ static void qjs_define_native_text_accessors(JSContext *ctx, JSValueConst obj)
 	JS_FreeAtom(ctx, atom);
 }
 
+static void qjs_refresh_js_select_options(JSContext *ctx,
+					  JSValueConst parent,
+					  JSValueConst child_nodes)
+{
+	JSValue tag = JS_GetPropertyStr(ctx, parent, "tagName");
+	char tag_text[24];
+	qjs_copy_js_string(tag_text, sizeof(tag_text), ctx, tag);
+	JS_FreeValue(ctx, tag);
+	if (qjs_ascii_equals_ci(tag_text, "SELECT")) {
+		JS_SetPropertyStr(ctx, parent, "options",
+				  JS_DupValue(ctx, child_nodes));
+	}
+}
+
 static JSValue qjs_get_child_nodes_array(JSContext *ctx, JSValueConst parent)
 {
 	JSValue child_nodes = JS_GetPropertyStr(ctx, parent, "childNodes");
@@ -1415,6 +1462,7 @@ static JSValue qjs_get_child_nodes_array(JSContext *ctx, JSValueConst parent)
 		JS_SetPropertyStr(ctx, parent, "children",
 				  JS_DupValue(ctx, child_nodes));
 	}
+	qjs_refresh_js_select_options(ctx, parent, child_nodes);
 	return child_nodes;
 }
 
@@ -1506,6 +1554,7 @@ static void qjs_refresh_js_child_links(JSContext *ctx, JSValueConst parent,
 	qjs_set_nullable_object(ctx, parent, "lastChild", last);
 	qjs_set_nullable_object(ctx, parent, "firstElementChild", first_element);
 	qjs_set_nullable_object(ctx, parent, "lastElementChild", last_element);
+	qjs_refresh_js_select_options(ctx, parent, child_nodes);
 	JS_FreeValue(ctx, first);
 	JS_FreeValue(ctx, last);
 	JS_FreeValue(ctx, first_element);
@@ -2089,6 +2138,11 @@ static JSValue qjs_new_dom_node_limited(JSContext *ctx, dom_node *node,
 			     qjs_native_remove_attribute, 1);
 	if (populate_children) {
 		qjs_populate_native_child_edges(ctx, obj, node);
+	}
+	if (qjs_element_tag_is(ctx, obj, "SELECT")) {
+		JSValue child_nodes = JS_GetPropertyStr(ctx, obj, "childNodes");
+		qjs_refresh_js_select_options(ctx, obj, child_nodes);
+		JS_FreeValue(ctx, child_nodes);
 	}
 	qjs_populate_native_parent_edges(ctx, obj, node, ancestor_depth);
 	if (tag != NULL) {
@@ -3200,6 +3254,7 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"function el(tag){var e=Object.create(HTMLElement.prototype);tag=String(tag||'').toUpperCase();"
 		"e.nodeType=1;e.tagName=tag;e.nodeName=tag;e.childNodes=arr();"
 		"e.children=e.childNodes;e.style=css();e.attributes={};"
+		"if(tag==='SELECT')e.options=e.childNodes;"
 		"e.parentNode=null;e.ownerDocument=g.document||null;e.textContent='';"
 		"e.parentElement=null;e.firstChild=null;e.lastChild=null;e.firstElementChild=null;e.lastElementChild=null;"
 		"e.innerHTML='';e.className='';e.id='';e.value='';e.defaultValue='';e.checked=false;e.selected=false;"
@@ -3368,7 +3423,7 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"cs.eventStream.eventTypes=cs.eventStream.eventTypes||{pageLoad:'pageLoad',formInteraction:'formInteraction',custom:'custom'};"
 		"cs.eventStream.EventTypes=cs.eventStream.EventTypes||cs.eventStream.eventTypes;"
 		"cs.eventStream.pageLoad=cs.eventStream.pageLoad||{sendPageLoad:noop,sendPageLoadTiming:noop,sendTiming:noop};"
-		"cs.guac=cs.guac||{getTreatment:function(){return null;},getBoolTreatment:function(){return false;},getIntTreatment:function(){return 0;},getGuacValues:function(){return Promise.resolve({});}};"
+		"cs.guac=cs.guac||{getTreatment:function(){return null;},getBoolTreatment:function(){return false;},getIntTreatment:function(){return 0;},getGuacValues:function(){return Promise.resolve({});},callBehaviour:function(){return Promise.resolve(null);}};"
 		"cs.meta=cs.meta||{};cs.meta.user=cs.meta.user||{isAuthenticated:false,userId:0,name:'',displayName:''};"
 		"cs.meta.device=cs.meta.device||{isMobile:false,isDesktop:true,isTablet:false};"
 		"cs.endpoints=cs.endpoints||{supportLocalizedUrls:false,removeUrlLocale:function(u){return String(u||'');},getAbsoluteUrl:function(p){p=String(p||'');return p.charAt(0)==='/'?eu.websiteUrl+p:p;},isAbsolute:function(u){return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(String(u||''));}};"
@@ -3431,6 +3486,8 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"langFill('Authentication.AccountSwitch',{'Action.LogIn':'Log In','Action.SwitchAccount':'Switch Account'});"
 		"langFill('Common.Captcha',{'Action.Verify':'Verify','Message.VerificationRequired':'Verification required'});"
 		"langFill('CommonUI.Controls',{'Action.Ok':'OK','Action.Cancel':'Cancel','Action.Close':'Close','Action.Continue':'Continue'});"
+		"langFill('Authentication.SignUp',{'Heading.CreateANewAccountSentenceCase':'Create a new account','Heading.DiscoverMillionsExperiences':'Discover millions of experiences','Message.Username.NoRealNameUse':'Do not use your real name.','Label.PasswordPlaceholder':'Password','Action.CreateAccountSentenceCase':'Create account','Label.AlreadyHaveAccountSignIn':'Already have an account? Sign in','Label.OptionalGender':'Gender (optional)','Label.TermsOfUse':'Terms of Use','Description.PrivacyPolicy':'Privacy Policy','Description.SignUpAgreement.FullCopy.FullParams':'By clicking Create Account, you agree to the Terms of Use and Privacy Policy.','Heading.ConfirmYourSelection':'Confirm your selection','Body.SignupExitAlmostDone':'You are almost done.','Label.SignInLowercase':'sign in','Label.BirthdayRequired':'Birthday is required'});"
+		"langFill('Feature.Landing',{'Heading.DiscoverMillionsExperiences':'Discover millions of experiences','Heading.RobloxOnDevice':'Roblox on your device','Link.AppleAppStoreRobloxApp':'https://www.roblox.com/download','Label.RobloxAppStore':'Roblox on the App Store','Link.GooglePlayStoreRobloxApp':'https://www.roblox.com/download','Label.GetOnGooglePlay':'Get it on Google Play','Link.PlayStationStoreRobloxAppV2':'https://www.roblox.com/download','Label.PlayStationStoreRobloxApp':'Roblox on PlayStation','Link.XboxStoreRobloxApp':'https://www.roblox.com/download','Label.RobloxOnXbox':'Roblox on Xbox','Link.MetaQuestStoreRobloxApp':'https://www.roblox.com/download','Label.MetaQuestStoreRobloxApp':'Roblox on Meta Quest','Link.MicrosoftStoreRobloxApp':'https://www.roblox.com/download','Label.RobloxMicrosoftStore':'Roblox on Microsoft Store','Link.AmazonStoreRobloxApp':'https://www.roblox.com/download','Label.RobloxAmazonStore':'Roblox on Amazon','Link.GalaxyStoreRobloxApp':'https://www.roblox.com/download','Label.GalaxyStoreRobloxApp':'Roblox on Galaxy Store'});"
 		"rb.Lang.get=rb.Lang.get||function(k){return String(k||'');};"
 		"rb.Lang.getTranslationResource=rb.Lang.getTranslationResource||function(n){return rb.LangDynamic[String(n||'')]||{};};"
 		"rb.Lang.getResource=rb.Lang.getResource||rb.Lang.getTranslationResource;rb.Lang.translate=rb.Lang.translate||rb.Lang.get;"
