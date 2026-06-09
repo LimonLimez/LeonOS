@@ -278,15 +278,6 @@ static JSValue qjs_dom_noop(JSContext *ctx, JSValueConst this_val,
 	return JS_UNDEFINED;
 }
 
-static JSValue qjs_dom_true(JSContext *ctx, JSValueConst this_val,
-			    int argc, JSValueConst *argv)
-{
-	(void) this_val;
-	(void) argc;
-	(void) argv;
-	return JS_NewBool(ctx, true);
-}
-
 static JSValue qjs_dom_arg0(JSContext *ctx, JSValueConst this_val,
 			    int argc, JSValueConst *argv)
 {
@@ -295,6 +286,238 @@ static JSValue qjs_dom_arg0(JSContext *ctx, JSValueConst this_val,
 		return JS_UNDEFINED;
 	}
 	return JS_DupValue(ctx, argv[0]);
+}
+
+static void qjs_dom_log_event_exception(JSContext *ctx)
+{
+	JSValue exception = JS_GetException(ctx);
+	const char *message = JS_ToCString(ctx, exception);
+	qjs_log("NETSURF QUICKJS EVENT EXCEPTION");
+	if (message != NULL && message[0] != 0) {
+		qjs_log(message);
+	}
+	if (JS_IsObject(exception)) {
+		qjs_log_js_error_stack(ctx, exception);
+	}
+	JS_FreeCString(ctx, message);
+	JS_FreeValue(ctx, exception);
+}
+
+static JSValue qjs_dom_event_listener_list(JSContext *ctx,
+					   JSValueConst target,
+					   const char *type,
+					   bool create)
+{
+	JSValue listeners;
+	JSValue list;
+	if (type == NULL || type[0] == 0) {
+		return JS_UNDEFINED;
+	}
+	listeners = JS_GetPropertyStr(ctx, target, "__leonosEventListeners");
+	if (!JS_IsObject(listeners)) {
+		JS_FreeValue(ctx, listeners);
+		if (!create) {
+			return JS_UNDEFINED;
+		}
+		listeners = JS_NewObject(ctx);
+		JS_SetPropertyStr(ctx, target, "__leonosEventListeners",
+				  JS_DupValue(ctx, listeners));
+	}
+	list = JS_GetPropertyStr(ctx, listeners, type);
+	if (!JS_IsObject(list)) {
+		JS_FreeValue(ctx, list);
+		if (!create) {
+			JS_FreeValue(ctx, listeners);
+			return JS_UNDEFINED;
+		}
+		list = JS_NewArray(ctx);
+		JS_SetPropertyStr(ctx, listeners, type, JS_DupValue(ctx, list));
+	}
+	JS_FreeValue(ctx, listeners);
+	return list;
+}
+
+static JSValue qjs_dom_add_event_listener(JSContext *ctx,
+					  JSValueConst this_val,
+					  int argc, JSValueConst *argv)
+{
+	const char *type;
+	JSValue list;
+	uint32_t length;
+	if (argc < 2 || (!JS_IsFunction(ctx, argv[1]) &&
+			 !JS_IsObject(argv[1]))) {
+		return JS_UNDEFINED;
+	}
+	type = JS_ToCString(ctx, argv[0]);
+	if (type == NULL) {
+		return JS_EXCEPTION;
+	}
+	list = qjs_dom_event_listener_list(ctx, this_val, type, true);
+	if (JS_IsObject(list)) {
+		length = qjs_array_length(ctx, list);
+		JS_SetPropertyUint32(ctx, list, length, JS_DupValue(ctx, argv[1]));
+	}
+	JS_FreeValue(ctx, list);
+	JS_FreeCString(ctx, type);
+	return JS_UNDEFINED;
+}
+
+static JSValue qjs_dom_remove_event_listener(JSContext *ctx,
+					     JSValueConst this_val,
+					     int argc, JSValueConst *argv)
+{
+	const char *type;
+	JSValue list;
+	uint32_t length;
+	if (argc < 2) {
+		return JS_UNDEFINED;
+	}
+	type = JS_ToCString(ctx, argv[0]);
+	if (type == NULL) {
+		return JS_EXCEPTION;
+	}
+	list = qjs_dom_event_listener_list(ctx, this_val, type, false);
+	if (!JS_IsObject(list)) {
+		JS_FreeValue(ctx, list);
+		JS_FreeCString(ctx, type);
+		return JS_UNDEFINED;
+	}
+	length = qjs_array_length(ctx, list);
+	for (uint32_t i = 0u; i < length; i++) {
+		JSValue item = JS_GetPropertyUint32(ctx, list, i);
+		bool same = JS_StrictEq(ctx, item, argv[1]);
+		JS_FreeValue(ctx, item);
+		if (!same) {
+			continue;
+		}
+		for (uint32_t j = i + 1u; j < length; j++) {
+			item = JS_GetPropertyUint32(ctx, list, j);
+			JS_SetPropertyUint32(ctx, list, j - 1u, item);
+		}
+		JS_SetPropertyStr(ctx, list, "length",
+				  JS_NewUint32(ctx, length - 1u));
+		break;
+	}
+	JS_FreeValue(ctx, list);
+	JS_FreeCString(ctx, type);
+	return JS_UNDEFINED;
+}
+
+static void qjs_dom_mark_event_prevented(JSContext *ctx, JSValueConst event)
+{
+	if (JS_IsObject(event)) {
+		JS_SetPropertyStr(ctx, event, "defaultPrevented",
+				  JS_NewBool(ctx, true));
+	}
+}
+
+static void qjs_dom_call_event_listener(JSContext *ctx,
+					JSValueConst target,
+					JSValueConst listener,
+					JSValueConst event)
+{
+	JSValue result = JS_UNDEFINED;
+	if (JS_IsFunction(ctx, listener)) {
+		result = JS_Call(ctx, listener, target, 1, &event);
+	} else if (JS_IsObject(listener)) {
+		JSValue handle = JS_GetPropertyStr(ctx, listener, "handleEvent");
+		if (JS_IsFunction(ctx, handle)) {
+			result = JS_Call(ctx, handle, listener, 1, &event);
+		}
+		JS_FreeValue(ctx, handle);
+	}
+	if (JS_IsException(result)) {
+		qjs_dom_log_event_exception(ctx);
+		return;
+	}
+	if (!JS_IsUndefined(result) && !JS_IsNull(result) &&
+	    JS_ToBool(ctx, result) == 0) {
+		qjs_dom_mark_event_prevented(ctx, event);
+	}
+	JS_FreeValue(ctx, result);
+}
+
+static JSValue qjs_dom_dispatch_event(JSContext *ctx, JSValueConst this_val,
+				      int argc, JSValueConst *argv)
+{
+	JSValue event;
+	JSValue type_value;
+	JSValue list;
+	JSValue default_prevented;
+	char type_buf[96];
+	const char *type_text;
+	uint32_t length;
+	bool allow_default = true;
+
+	type_buf[0] = 0;
+	if (argc >= 1 && JS_IsObject(argv[0])) {
+		event = JS_DupValue(ctx, argv[0]);
+		type_value = JS_GetPropertyStr(ctx, event, "type");
+		type_text = JS_ToCString(ctx, type_value);
+		if (type_text != NULL) {
+			snprintf(type_buf, sizeof(type_buf), "%s", type_text);
+			JS_FreeCString(ctx, type_text);
+		}
+		JS_FreeValue(ctx, type_value);
+	} else {
+		event = JS_NewObject(ctx);
+		if (argc >= 1) {
+			type_text = JS_ToCString(ctx, argv[0]);
+			if (type_text != NULL) {
+				snprintf(type_buf, sizeof(type_buf), "%s",
+					 type_text);
+				JS_FreeCString(ctx, type_text);
+			}
+		}
+		JS_SetPropertyStr(ctx, event, "type",
+				  JS_NewString(ctx, type_buf));
+	}
+	if (type_buf[0] == 0) {
+		JS_FreeValue(ctx, event);
+		return JS_NewBool(ctx, true);
+	}
+	{
+		JSValue target = JS_GetPropertyStr(ctx, event, "target");
+		if (JS_IsUndefined(target) || JS_IsNull(target)) {
+			JS_SetPropertyStr(ctx, event, "target",
+					  JS_DupValue(ctx, this_val));
+		}
+		JS_FreeValue(ctx, target);
+	}
+	JS_SetPropertyStr(ctx, event, "currentTarget",
+			  JS_DupValue(ctx, this_val));
+	default_prevented = JS_GetPropertyStr(ctx, event, "defaultPrevented");
+	if (JS_IsUndefined(default_prevented) || JS_IsNull(default_prevented)) {
+		JS_SetPropertyStr(ctx, event, "defaultPrevented",
+				  JS_NewBool(ctx, false));
+	}
+	JS_FreeValue(ctx, default_prevented);
+	{
+		char handler_name[112];
+		JSValue handler;
+		snprintf(handler_name, sizeof(handler_name), "on%s", type_buf);
+		handler = JS_GetPropertyStr(ctx, this_val, handler_name);
+		qjs_dom_call_event_listener(ctx, this_val, handler, event);
+		JS_FreeValue(ctx, handler);
+	}
+	list = qjs_dom_event_listener_list(ctx, this_val, type_buf, false);
+	if (JS_IsObject(list)) {
+		length = qjs_array_length(ctx, list);
+		for (uint32_t i = 0u; i < length; i++) {
+			JSValue listener = JS_GetPropertyUint32(ctx, list, i);
+			qjs_dom_call_event_listener(ctx, this_val, listener,
+						    event);
+			JS_FreeValue(ctx, listener);
+		}
+	}
+	JS_FreeValue(ctx, list);
+	default_prevented = JS_GetPropertyStr(ctx, event, "defaultPrevented");
+	if (JS_ToBool(ctx, default_prevented) > 0) {
+		allow_default = false;
+	}
+	JS_FreeValue(ctx, default_prevented);
+	JS_FreeValue(ctx, event);
+	return JS_NewBool(ctx, allow_default);
 }
 
 static bool qjs_js_node_is_element(JSContext *ctx, JSValueConst value)
@@ -975,9 +1198,12 @@ static JSValue qjs_new_basic_element(JSContext *ctx,
 	qjs_set_string(ctx, obj, "namespaceURI",
 		       "http://www.w3.org/1999/xhtml");
 	qjs_set_owner_document(ctx, obj);
-	qjs_install_function(ctx, obj, "addEventListener", qjs_dom_noop, 2);
-	qjs_install_function(ctx, obj, "removeEventListener", qjs_dom_noop, 2);
-	qjs_install_function(ctx, obj, "dispatchEvent", qjs_dom_true, 1);
+	qjs_install_function(ctx, obj, "addEventListener",
+			     qjs_dom_add_event_listener, 2);
+	qjs_install_function(ctx, obj, "removeEventListener",
+			     qjs_dom_remove_event_listener, 2);
+	qjs_install_function(ctx, obj, "dispatchEvent",
+			     qjs_dom_dispatch_event, 1);
 	qjs_install_function(ctx, obj, "focus", qjs_dom_noop, 0);
 	qjs_install_function(ctx, obj, "blur", qjs_dom_noop, 0);
 	qjs_install_function(ctx, obj, "appendChild", qjs_dom_arg0, 1);
@@ -2148,9 +2374,12 @@ static JSValue qjs_new_dom_node_limited(JSContext *ctx, dom_node *node,
 	qjs_install_function(ctx, obj, "replaceChild", qjs_native_replace_child, 2);
 	qjs_install_function(ctx, obj, "contains", qjs_native_contains, 1);
 	qjs_install_function(ctx, obj, "cloneNode", qjs_native_clone_node, 1);
-	qjs_install_function(ctx, obj, "addEventListener", qjs_dom_noop, 2);
-	qjs_install_function(ctx, obj, "removeEventListener", qjs_dom_noop, 2);
-	qjs_install_function(ctx, obj, "dispatchEvent", qjs_dom_true, 1);
+	qjs_install_function(ctx, obj, "addEventListener",
+			     qjs_dom_add_event_listener, 2);
+	qjs_install_function(ctx, obj, "removeEventListener",
+			     qjs_dom_remove_event_listener, 2);
+	qjs_install_function(ctx, obj, "dispatchEvent",
+			     qjs_dom_dispatch_event, 1);
 	qjs_install_function(ctx, obj, "focus", qjs_dom_noop, 0);
 	qjs_install_function(ctx, obj, "blur", qjs_dom_noop, 0);
 	if (type != DOM_ELEMENT_NODE) {
@@ -3249,6 +3478,20 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"if(host.charAt(c+1)===':')po=host.slice(c+2);}}else{var x=host.indexOf(':');if(x>=0){hn=host.slice(0,x);po=host.slice(x+1);}}"
 		"e.href=full;e.protocol=r[1]||'';e.host=host;e.hostname=hn;e.port=po;e.pathname=path;e.search=r[4]||'';"
 		"e.hash=r[5]||'';e.origin=(e.protocol&&e.host)?e.protocol+'//'+e.host:'';return full;}"
+		"function evtObj(t){return {type:String(t||''),target:null,currentTarget:null,defaultPrevented:false,"
+		"preventDefault:function(){this.defaultPrevented=true;},stopPropagation:noop,stopImmediatePropagation:noop};}"
+		"function callEvt(o,f,e){try{var r;if(typeof f==='function')r=f.call(o,e);"
+		"else if(f&&typeof f.handleEvent==='function')r=f.handleEvent(e);if(r===false&&e.preventDefault)e.preventDefault();}"
+		"catch(x){try{g._DumpException(x);}catch(y){}}}"
+		"function eventful(o){if(!o)return o;o._leonosListeners=o._leonosListeners||{};"
+		"o.addEventListener=function(t,f){t=String(t||'');if(!t||(!f&&f!==0))return;"
+		"var a=o._leonosListeners[t]||(o._leonosListeners[t]=[]);a.push(f);};"
+		"o.removeEventListener=function(t,f){var a=o._leonosListeners&&o._leonosListeners[String(t||'')];"
+		"if(!a)return;for(var i=0;i<a.length;i++)if(a[i]===f){a.splice(i,1);break;}};"
+		"o.dispatchEvent=function(e){if(!e||typeof e!=='object')e=evtObj(e);if(!e.type)e.type=String(e.type||'');"
+		"if(!e.target)e.target=o;e.currentTarget=o;if(e.defaultPrevented===void 0)e.defaultPrevented=false;"
+		"var h=o['on'+e.type];callEvt(o,h,e);var a=(o._leonosListeners&&o._leonosListeners[e.type]||[]).slice();"
+		"for(var i=0;i<a.length;i++)callEvt(o,a[i],e);return !e.defaultPrevented;};return o;}"
 		"Element.prototype.getAttribute=Element.prototype.getAttribute||function(n){"
 		"n=String(n);return this.attributes&&this.attributes.hasOwnProperty(n)?this.attributes[n]:"
 		"(n==='class'?this.className:(this[n]!==void 0?String(this[n]):null));};"
@@ -3344,16 +3587,15 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"e.getAttribute=function(n){n=String(n);return e.attributes.hasOwnProperty(n)?e.attributes[n]:null;};"
 		"e.hasAttribute=function(n){return e.attributes.hasOwnProperty(String(n));};"
 		"e.removeAttribute=function(n){delete e.attributes[String(n)];};"
-		"e.addEventListener=noop;e.removeEventListener=noop;e.dispatchEvent=function(){return true;};"
+		"eventful(e);"
 		"e.focus=noop;e.blur=noop;"
 		"e.querySelector=function(s){var r=tagSearch(e,s);return r.length?r[0]:null;};e.querySelectorAll=function(s){return tagSearch(e,s);};"
 		"e.getElementsByTagName=function(t){return tagSearch(e,t);};e.getElementsByClassName=arr;"
 		"e.cloneNode=function(deep){return cloneElem(e,!!deep);};return e;}"
 		"g.window=g.window||g;g.self=g.self||g;g.globalThis=g.globalThis||g;"
 		"g.top=g.top||g;g.parent=g.parent||g;g.frames=g.frames||g;g.length=g.length||0;"
-		"function addEvt(n,f){if(typeof f==='function'&&(n==='load'||n==='DOMContentLoaded'||n==='readystatechange'))g.setTimeout(f,0);}"
-		"g.addEventListener=g.addEventListener||addEvt;g.removeEventListener=g.removeEventListener||noop;"
-		"g.dispatchEvent=g.dispatchEvent||function(){return true;};"
+		"eventful(g);var rawAddEvt=g.addEventListener;g.addEventListener=function(n,f){rawAddEvt.call(g,n,f);"
+		"if(typeof f==='function'&&(n==='load'||n==='DOMContentLoaded'||n==='readystatechange'))g.setTimeout(function(){callEvt(g,f,evtObj(n));},0);};"
 		"g.scroll=g.scroll||noop;g.scrollTo=g.scrollTo||g.scroll;g.scrollBy=g.scrollBy||noop;"
 		"var nextTimer=1,timerDepth=0,timerCalls=0;"
 		"g.setTimeout=g.setTimeout||function(f){var id=nextTimer++;"
@@ -3439,9 +3681,21 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"g.URLSearchParams=g.URLSearchParams||function(){this.get=function(){return null;};this.set=noop;this.toString=function(){return '';};};"
 		"g.URL=g.URL||function(u){this.href=String(u||'');this.searchParams=new g.URLSearchParams('');this.toString=function(){return this.href;};};"
 		"function jqObj(a){a=a||arr();a.each=function(f){for(var i=0;i<a.length;i++)if(f)f.call(a[i],i,a[i]);return a;};"
-		"a.on=a.off=a.bind=a.unbind=a.delegate=a.undelegate=a.trigger=function(){return a;};"
+		"a.on=a.bind=function(t,f){if(typeof t==='object'){for(var k in t)if(t.hasOwnProperty(k))a.on(k,t[k]);return a;}"
+		"if(typeof f!=='function')return a;String(t||'').split(/\\s+/).forEach(function(n){if(!n)return;"
+		"a.each(function(){if(this.addEventListener)this.addEventListener(n,f);});});return a;};"
+		"a.off=a.unbind=function(t,f){String(t||'').split(/\\s+/).forEach(function(n){if(!n)return;"
+		"a.each(function(){if(this.removeEventListener)this.removeEventListener(n,f);});});return a;};"
+		"a.trigger=function(t){var e=typeof t==='string'?evtObj(t):(t||evtObj(''));a.each(function(){if(this.dispatchEvent)this.dispatchEvent(e);});return a;};"
+		"a.delegate=function(s,t,f){return a.on(t,f);};a.undelegate=function(s,t,f){return a.off(t,f);};"
 		"a.ready=function(f){if(typeof f==='function')g.setTimeout(f,0);return a;};"
-		"a.click=a.submit=a.change=a.keyup=a.keydown=a.focus=a.blur=function(f){if(typeof f==='function')return a.on('',f);return a;};"
+		"a.click=function(f){return typeof f==='function'?a.on('click',f):a.trigger('click');};"
+		"a.submit=function(f){return typeof f==='function'?a.on('submit',f):a.trigger('submit');};"
+		"a.change=function(f){return typeof f==='function'?a.on('change',f):a.trigger('change');};"
+		"a.keyup=function(f){return typeof f==='function'?a.on('keyup',f):a.trigger('keyup');};"
+		"a.keydown=function(f){return typeof f==='function'?a.on('keydown',f):a.trigger('keydown');};"
+		"a.focus=function(f){return typeof f==='function'?a.on('focus',f):a.trigger('focus');};"
+		"a.blur=function(f){return typeof f==='function'?a.on('blur',f):a.trigger('blur');};"
 		"a.attr=function(n,v){if(v===void 0)return a[0]&&a[0].getAttribute?a[0].getAttribute(n):void 0;a.each(function(){if(this.setAttribute)this.setAttribute(n,v);});return a;};"
 		"a.prop=function(n,v){if(v===void 0)return a[0]?a[0][n]:void 0;a.each(function(){this[n]=v;});return a;};"
 		"a.val=function(v){if(v===void 0)return a[0]&&a[0].value||'';a.each(function(){this.value=v;});return a;};"
@@ -3609,7 +3863,8 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"d.implementation.createHTMLDocument=d.implementation.createHTMLDocument||function(){var x={};Object.setPrototypeOf&&Object.setPrototypeOf(x,Document.prototype);x.createElement=d.createElement;x.createTextNode=d.createTextNode;x.createDocumentFragment=d.createDocumentFragment;x.createEvent=d.createEvent;x.head=el('head');x.body=el('body');x.documentElement=el('html');x.defaultView=g;x[0]=x;x.length=1;x.item=function(i){return i===0?x:null;};x.documentElement.ownerDocument=x;x.head.ownerDocument=x;x.body.ownerDocument=x;return x;};"
 		"d.getElementById=function(){return fallback();};d.querySelector=function(){return fallback();};"
 		"d.querySelectorAll=arr;d.getElementsByTagName=function(t){var a=arr();t=String(t||'').toLowerCase();if(t==='head')a.push(d.head);else if(t==='body')a.push(d.body);return a;};"
-		"d.getElementsByClassName=arr;d.addEventListener=g.addEventListener;d.removeEventListener=g.removeEventListener;"
+		"d.getElementsByClassName=arr;eventful(d);var docAddEvt=d.addEventListener;d.addEventListener=function(n,f){docAddEvt.call(d,n,f);"
+		"if(typeof f==='function'&&(n==='DOMContentLoaded'||n==='readystatechange'||n==='load'))g.setTimeout(function(){callEvt(d,f,evtObj(n));},0);};"
 		"d.documentElement=d.documentElement||el('html');d.head=d.head||el('head');d.body=d.body||el('body');"
 		"d.defaultView=g;d[0]=d;d.length=1;d.item=function(i){return i===0?d:null;};"
 		"d.documentElement.ownerDocument=d;d.head.ownerDocument=d;d.body.ownerDocument=d;"
