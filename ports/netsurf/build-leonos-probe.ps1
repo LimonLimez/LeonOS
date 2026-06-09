@@ -888,6 +888,7 @@ function Ensure-NetSurfLeonOsSourcePatches {
     $ObjectSource = Join-Path $NetSurfRoot "content\handlers\html\object.c"
     $RedrawSource = Join-Path $NetSurfRoot "content\handlers\html\redraw.c"
     $ScriptSource = Join-Path $NetSurfRoot "content\handlers\html\script.c"
+    $ScrollbarSource = Join-Path $NetSurfRoot "desktop\scrollbar.c"
     $PlotSource = Join-Path $NetSurfRoot "frontends\monkey\plot.c"
     $BrowserSource = Join-Path $NetSurfRoot "frontends\monkey\browser.c"
     $BrowserHeader = Join-Path $NetSurfRoot "frontends\monkey\browser.h"
@@ -910,6 +911,9 @@ function Ensure-NetSurfLeonOsSourcePatches {
     }
     if (-not (Test-Path -LiteralPath $ScriptSource)) {
         throw "NetSurf script source missing at $ScriptSource."
+    }
+    if (-not (Test-Path -LiteralPath $ScrollbarSource)) {
+        throw "NetSurf scrollbar source missing at $ScrollbarSource."
     }
     if (-not (Test-Path -LiteralPath $PlotSource)) {
         throw "NetSurf monkey plot source missing at $PlotSource."
@@ -1594,6 +1598,31 @@ struct leonos_css_var {
             throw "Could not patch NetSurf LeonOS DOM rebuild proceed-to-done hook."
         }
         $HtmlText = $HtmlText.Replace($OldLeonOsProceedDone, $NewLeonOsProceedDone)
+
+        $OldLeonOsRebuildFree = @'
+	if (c->bctx != NULL) {
+		talloc_free(c->bctx);
+		c->bctx = NULL;
+	}
+	c->layout = NULL;
+	html_get_dimensions(c);
+'@
+        $OldLeonOsRebuildFree = $OldLeonOsRebuildFree -replace "`r`n", "`n"
+        $NewLeonOsRebuildFree = @'
+#ifndef LEONOS_USER_APP
+	if (c->bctx != NULL) {
+		talloc_free(c->bctx);
+		c->bctx = NULL;
+	}
+	c->layout = NULL;
+#endif
+	html_get_dimensions(c);
+'@
+        $NewLeonOsRebuildFree = $NewLeonOsRebuildFree -replace "`r`n", "`n"
+        if (-not $HtmlText.Contains($OldLeonOsRebuildFree)) {
+            throw "Could not patch NetSurf LeonOS DOM rebuild layout lifetime."
+        }
+        $HtmlText = $HtmlText.Replace($OldLeonOsRebuildFree, $NewLeonOsRebuildFree)
         [System.IO.File]::WriteAllText($HtmlSource, $HtmlText, [System.Text.Encoding]::ASCII)
     }
 
@@ -1651,6 +1680,108 @@ struct leonos_css_var {
         }
         $RedrawText = $RedrawText.Replace($OldRedrawGuard, $NewRedrawGuard)
         [System.IO.File]::WriteAllText($RedrawSource, $RedrawText, [System.Text.Encoding]::ASCII)
+    }
+
+    $ScrollbarText = [System.IO.File]::ReadAllText($ScrollbarSource) -replace "`r`n", "`n"
+    if ($ScrollbarText -notmatch 'LEONOS_SCROLLBAR_MAGIC') {
+        $OldScrollbarStruct = @'
+struct scrollbar {
+	/** Horizontal scrollbar if true, else vertical */
+'@
+        $OldScrollbarStruct = $OldScrollbarStruct -replace "`r`n", "`n"
+        $NewScrollbarStruct = @'
+#define LEONOS_SCROLLBAR_MAGIC 0x4C534352UL
+
+struct scrollbar {
+#ifdef LEONOS_USER_APP
+	unsigned long leonos_magic;
+#endif
+	/** Horizontal scrollbar if true, else vertical */
+'@
+        $NewScrollbarStruct = $NewScrollbarStruct -replace "`r`n", "`n"
+        if (-not $ScrollbarText.Contains($OldScrollbarStruct)) {
+            throw "Could not patch NetSurf LeonOS scrollbar struct guard."
+        }
+        $ScrollbarText = $ScrollbarText.Replace($OldScrollbarStruct, $NewScrollbarStruct)
+
+        $OldScrollbarInit = @'
+	scrollbar->horizontal = horizontal;
+'@
+        $OldScrollbarInit = $OldScrollbarInit -replace "`r`n", "`n"
+        $NewScrollbarInit = @'
+#ifdef LEONOS_USER_APP
+	scrollbar->leonos_magic = LEONOS_SCROLLBAR_MAGIC;
+#endif
+	scrollbar->horizontal = horizontal;
+'@
+        $NewScrollbarInit = $NewScrollbarInit -replace "`r`n", "`n"
+        if (-not $ScrollbarText.Contains($OldScrollbarInit)) {
+            throw "Could not patch NetSurf LeonOS scrollbar magic init."
+        }
+        $ScrollbarText = $ScrollbarText.Replace($OldScrollbarInit, $NewScrollbarInit)
+    }
+    if ($ScrollbarText -notmatch 'leonos_scrollbar_ptr_valid') {
+        $OldScrollbarGetOffset = @'
+int scrollbar_get_offset(struct scrollbar *s)
+{
+	if (s == NULL) {
+		return 0;
+	}
+	return s->offset;
+}
+'@
+        $OldScrollbarGetOffset = $OldScrollbarGetOffset -replace "`r`n", "`n"
+        $NewScrollbarGetOffset = @'
+static bool leonos_scrollbar_ptr_valid(struct scrollbar *s)
+{
+#ifdef LEONOS_USER_APP
+	unsigned long address = (unsigned long) s;
+	if (address < 0x40000000UL) {
+		return false;
+	}
+	return s->leonos_magic == LEONOS_SCROLLBAR_MAGIC;
+#else
+	return s != NULL;
+#endif
+}
+
+int scrollbar_get_offset(struct scrollbar *s)
+{
+	if (!leonos_scrollbar_ptr_valid(s)) {
+		return 0;
+	}
+	return s->offset;
+}
+'@
+        $NewScrollbarGetOffset = $NewScrollbarGetOffset -replace "`r`n", "`n"
+        if (-not $ScrollbarText.Contains($OldScrollbarGetOffset)) {
+            throw "Could not patch NetSurf LeonOS scrollbar offset guard."
+        }
+        $ScrollbarText = $ScrollbarText.Replace($OldScrollbarGetOffset, $NewScrollbarGetOffset)
+
+        $OldScrollbarSetExtents = @'
+void scrollbar_set_extents(struct scrollbar *s, int length,
+			   int visible_size, int full_size)
+{
+	int cur_excess = s->full_size - s->visible_size;
+'@
+        $OldScrollbarSetExtents = $OldScrollbarSetExtents -replace "`r`n", "`n"
+        $NewScrollbarSetExtents = @'
+void scrollbar_set_extents(struct scrollbar *s, int length,
+			   int visible_size, int full_size)
+{
+	int cur_excess;
+	if (!leonos_scrollbar_ptr_valid(s)) {
+		return;
+	}
+	cur_excess = s->full_size - s->visible_size;
+'@
+        $NewScrollbarSetExtents = $NewScrollbarSetExtents -replace "`r`n", "`n"
+        if (-not $ScrollbarText.Contains($OldScrollbarSetExtents)) {
+            throw "Could not patch NetSurf LeonOS scrollbar extent guard."
+        }
+        $ScrollbarText = $ScrollbarText.Replace($OldScrollbarSetExtents, $NewScrollbarSetExtents)
+        [System.IO.File]::WriteAllText($ScrollbarSource, $ScrollbarText, [System.Text.Encoding]::ASCII)
     }
 
     $FetchText = [System.IO.File]::ReadAllText($FetchSource) -replace "`r`n", "`n"

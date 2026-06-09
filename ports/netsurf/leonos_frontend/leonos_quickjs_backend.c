@@ -45,6 +45,9 @@ static JSClassID qjs_dom_node_class_id;
 
 static JSValue qjs_new_dom_node(JSContext *ctx, dom_node *node);
 static JSValue qjs_new_dom_element(JSContext *ctx, dom_element *element);
+static JSValue qjs_new_dom_node_limited(JSContext *ctx, dom_node *node,
+				       unsigned int ancestor_depth,
+				       bool populate_children);
 static uint32_t qjs_array_length(JSContext *ctx, JSValueConst array);
 
 static int qjs_interrupt_handler(JSRuntime *rt, void *opaque)
@@ -934,6 +937,8 @@ static JSValue qjs_new_basic_element(JSContext *ctx,
 	qjs_install_function(ctx, obj, "addEventListener", qjs_dom_noop, 2);
 	qjs_install_function(ctx, obj, "removeEventListener", qjs_dom_noop, 2);
 	qjs_install_function(ctx, obj, "dispatchEvent", qjs_dom_true, 1);
+	qjs_install_function(ctx, obj, "focus", qjs_dom_noop, 0);
+	qjs_install_function(ctx, obj, "blur", qjs_dom_noop, 0);
 	qjs_install_function(ctx, obj, "appendChild", qjs_dom_arg0, 1);
 	qjs_install_function(ctx, obj, "insertBefore", qjs_dom_arg0, 2);
 	qjs_install_function(ctx, obj, "removeChild", qjs_dom_arg0, 1);
@@ -1895,7 +1900,8 @@ static void qjs_populate_native_child_edges(JSContext *ctx, JSValueConst obj,
 	if (dom_node_get_first_child(node, &child) == DOM_NO_ERR) {
 		while (child != NULL) {
 			dom_node *next = NULL;
-			JSValue wrapped = qjs_new_dom_node(ctx, child);
+			JSValue wrapped = qjs_new_dom_node_limited(ctx, child,
+								  0u, true);
 			JS_DefinePropertyValueUint32(ctx, child_nodes, index++,
 						     wrapped, JS_PROP_C_W_E);
 			if (dom_node_get_next_sibling(child, &next) !=
@@ -1910,7 +1916,36 @@ static void qjs_populate_native_child_edges(JSContext *ctx, JSValueConst obj,
 	JS_FreeValue(ctx, child_nodes);
 }
 
-static JSValue qjs_new_dom_node(JSContext *ctx, dom_node *node)
+static void qjs_populate_native_parent_edges(JSContext *ctx, JSValueConst obj,
+					     dom_node *node,
+					     unsigned int ancestor_depth)
+{
+	dom_node *parent = NULL;
+	dom_node_type parent_type = DOM_NODE_TYPE_COUNT;
+	JSValue wrapped_parent;
+	if (ancestor_depth == 0u || node == NULL ||
+	    dom_node_get_parent_node(node, &parent) != DOM_NO_ERR ||
+	    parent == NULL) {
+		return;
+	}
+	wrapped_parent = qjs_new_dom_node_limited(ctx, parent,
+						 ancestor_depth - 1u, false);
+	JS_SetPropertyStr(ctx, obj, "parentNode",
+			  JS_DupValue(ctx, wrapped_parent));
+	if (dom_node_get_node_type(parent, &parent_type) == DOM_NO_ERR &&
+	    parent_type == DOM_ELEMENT_NODE) {
+		JS_SetPropertyStr(ctx, obj, "parentElement",
+				  JS_DupValue(ctx, wrapped_parent));
+	} else {
+		JS_SetPropertyStr(ctx, obj, "parentElement", JS_NULL);
+	}
+	JS_FreeValue(ctx, wrapped_parent);
+	dom_node_unref(parent);
+}
+
+static JSValue qjs_new_dom_node_limited(JSContext *ctx, dom_node *node,
+				       unsigned int ancestor_depth,
+				       bool populate_children)
 {
 	JSValue obj;
 	JSValue style;
@@ -1985,8 +2020,13 @@ static JSValue qjs_new_dom_node(JSContext *ctx, dom_node *node)
 	qjs_install_function(ctx, obj, "addEventListener", qjs_dom_noop, 2);
 	qjs_install_function(ctx, obj, "removeEventListener", qjs_dom_noop, 2);
 	qjs_install_function(ctx, obj, "dispatchEvent", qjs_dom_true, 1);
+	qjs_install_function(ctx, obj, "focus", qjs_dom_noop, 0);
+	qjs_install_function(ctx, obj, "blur", qjs_dom_noop, 0);
 	if (type != DOM_ELEMENT_NODE) {
-		qjs_populate_native_child_edges(ctx, obj, node);
+		if (populate_children) {
+			qjs_populate_native_child_edges(ctx, obj, node);
+		}
+		qjs_populate_native_parent_edges(ctx, obj, node, ancestor_depth);
 		return obj;
 	}
 	(void) dom_element_get_tag_name((dom_element *) node, &tag);
@@ -2039,7 +2079,10 @@ static JSValue qjs_new_dom_node(JSContext *ctx, dom_node *node)
 	qjs_install_function(ctx, obj, "setAttribute", qjs_native_set_attribute, 2);
 	qjs_install_function(ctx, obj, "removeAttribute",
 			     qjs_native_remove_attribute, 1);
-	qjs_populate_native_child_edges(ctx, obj, node);
+	if (populate_children) {
+		qjs_populate_native_child_edges(ctx, obj, node);
+	}
+	qjs_populate_native_parent_edges(ctx, obj, node, ancestor_depth);
 	if (tag != NULL) {
 		dom_string_unref(tag);
 	}
@@ -2050,6 +2093,11 @@ static JSValue qjs_new_dom_node(JSContext *ctx, dom_node *node)
 		dom_string_unref(class_name);
 	}
 	return obj;
+}
+
+static JSValue qjs_new_dom_node(JSContext *ctx, dom_node *node)
+{
+	return qjs_new_dom_node_limited(ctx, node, 2u, true);
 }
 
 static JSValue qjs_new_dom_element(JSContext *ctx, dom_element *element)
@@ -3050,6 +3098,7 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"n=String(n);if(this.attributes)delete this.attributes[n];};"
 		"Element.prototype.hasAttribute=Element.prototype.hasAttribute||function(n){"
 		"n=String(n);return !!(this.attributes&&this.attributes.hasOwnProperty(n));};"
+		"Element.prototype.focus=Element.prototype.focus||noop;Element.prototype.blur=Element.prototype.blur||noop;"
 		"Element.prototype.contains=Element.prototype.contains||function(n){"
 		"for(;n;n=n.parentNode||n.parentElement){if(n===this)return true;}return false;};"
 		"function textNode(v){return {nodeType:3,nodeName:'#text',nodeValue:String(v||''),"
@@ -3133,6 +3182,7 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"e.hasAttribute=function(n){return e.attributes.hasOwnProperty(String(n));};"
 		"e.removeAttribute=function(n){delete e.attributes[String(n)];};"
 		"e.addEventListener=noop;e.removeEventListener=noop;e.dispatchEvent=function(){return true;};"
+		"e.focus=noop;e.blur=noop;"
 		"e.querySelector=function(s){var r=tagSearch(e,s);return r.length?r[0]:null;};e.querySelectorAll=function(s){return tagSearch(e,s);};"
 		"e.getElementsByTagName=function(t){return tagSearch(e,t);};e.getElementsByClassName=arr;"
 		"e.cloneNode=function(deep){return cloneElem(e,!!deep);};return e;}"
@@ -3140,6 +3190,7 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"function addEvt(n,f){if(typeof f==='function'&&(n==='load'||n==='DOMContentLoaded'||n==='readystatechange'))g.setTimeout(f,0);}"
 		"g.addEventListener=g.addEventListener||addEvt;g.removeEventListener=g.removeEventListener||noop;"
 		"g.dispatchEvent=g.dispatchEvent||function(){return true;};"
+		"g.scroll=g.scroll||noop;g.scrollTo=g.scrollTo||g.scroll;g.scrollBy=g.scrollBy||noop;"
 		"var nextTimer=1,timerDepth=0,timerCalls=0;"
 		"g.setTimeout=g.setTimeout||function(f){var id=nextTimer++;"
 		"if(typeof f==='function'&&timerDepth<2&&timerCalls<32){timerDepth++;timerCalls++;"
