@@ -569,6 +569,18 @@ static void qjs_set_string(JSContext *ctx, JSValueConst obj,
 	JS_SetPropertyStr(ctx, obj, name, JS_NewString(ctx, value));
 }
 
+static void qjs_delete_property_cstr(JSContext *ctx, JSValueConst obj,
+				     const char *name)
+{
+	JSAtom atom;
+	if (name == NULL || name[0] == 0) {
+		return;
+	}
+	atom = JS_NewAtom(ctx, name);
+	JS_DeleteProperty(ctx, obj, atom, 0);
+	JS_FreeAtom(ctx, atom);
+}
+
 static void qjs_install_function(JSContext *ctx, JSValueConst obj,
 				 const char *name, JSCFunction *func,
 				 int argc)
@@ -2213,6 +2225,27 @@ static JSValue qjs_native_set_attribute(JSContext *ctx, JSValueConst this_val,
 		} else if (strcmp(name_text, "class") == 0) {
 			qjs_set_string(ctx, this_val, "className", value_text);
 		}
+		{
+			char dataset_name[128];
+			if (qjs_dataset_name_from_attr(dataset_name,
+						       sizeof(dataset_name),
+						       name_text)) {
+				JSValue dataset = JS_GetPropertyStr(ctx,
+								     this_val,
+								     "dataset");
+				if (!JS_IsObject(dataset)) {
+					JS_FreeValue(ctx, dataset);
+					dataset = JS_NewObject(ctx);
+					JS_SetPropertyStr(ctx, this_val,
+							  "dataset",
+							  JS_DupValue(ctx,
+								      dataset));
+				}
+				qjs_set_string(ctx, dataset, dataset_name,
+					       value_text);
+				JS_FreeValue(ctx, dataset);
+			}
+		}
 		qjs_maybe_update_anchor_from_attr(ctx, this_val,
 						  name_text, value_text);
 	}
@@ -2232,13 +2265,44 @@ static JSValue qjs_native_remove_attribute(JSContext *ctx, JSValueConst this_val
 {
 	struct qjs_native_node *native = qjs_get_native_node(this_val);
 	dom_string *name = NULL;
+	const char *name_text;
 	if (argc < 1 || native == NULL || native->node == NULL) {
 		return JS_UNDEFINED;
 	}
+	name_text = JS_ToCString(ctx, argv[0]);
 	if (qjs_dom_string_from_js(ctx, argv[0], &name)) {
 		(void) dom_element_remove_attribute((dom_element *) native->node,
 						    name);
 		dom_string_unref(name);
+	}
+	if (name_text != NULL) {
+		JSValue attrs = JS_GetPropertyStr(ctx, this_val, "attributes");
+		if (JS_IsObject(attrs)) {
+			qjs_delete_property_cstr(ctx, attrs, name_text);
+		}
+		JS_FreeValue(ctx, attrs);
+		qjs_delete_property_cstr(ctx, this_val, name_text);
+		if (strcmp(name_text, "id") == 0) {
+			qjs_set_string(ctx, this_val, "id", "");
+		} else if (strcmp(name_text, "class") == 0) {
+			qjs_set_string(ctx, this_val, "className", "");
+		}
+		{
+			char dataset_name[128];
+			if (qjs_dataset_name_from_attr(dataset_name,
+						       sizeof(dataset_name),
+						       name_text)) {
+				JSValue dataset = JS_GetPropertyStr(ctx,
+								     this_val,
+								     "dataset");
+				if (JS_IsObject(dataset)) {
+					qjs_delete_property_cstr(ctx, dataset,
+								 dataset_name);
+				}
+				JS_FreeValue(ctx, dataset);
+			}
+		}
+		JS_FreeCString(ctx, name_text);
 	}
 	return JS_UNDEFINED;
 }
@@ -3458,10 +3522,18 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"HTMLImageElement=ctor('HTMLImageElement',HTMLElement),HTMLAnchorElement=ctor('HTMLAnchorElement',HTMLElement),"
 		"HTMLFormElement=ctor('HTMLFormElement',HTMLElement);"
 		"Node.ELEMENT_NODE=1;Node.TEXT_NODE=3;Node.DOCUMENT_NODE=9;Node.DOCUMENT_FRAGMENT_NODE=11;"
-		"function hasClass(e,c){return (' '+(e.className||'')+' ').indexOf(' '+c+' ')>=0;}"
+		"function cls(e){return String(e.className||'').trim().split(/\\s+/).filter(Boolean);}"
+		"function setCls(e,a){e.className=a.join(' ');if(e.attributes)e.attributes['class']=e.className;}"
+		"function hasClass(e,c){return cls(e).indexOf(String(c))>=0;}"
+		"function dataName(n){return String(n||'').slice(5).replace(/-([a-z])/g,function(m,c){return c.toUpperCase();});}"
+		"function syncData(e,n,v){if(String(n).indexOf('data-')===0){e.dataset=e.dataset||{};e.dataset[dataName(n)]=String(v);}}"
+		"function delData(e,n){if(String(n).indexOf('data-')===0&&e.dataset)delete e.dataset[dataName(n)];}"
 		"function cl(e){return {contains:function(c){return hasClass(e,String(c));},"
-		"add:function(c){c=String(c);if(!hasClass(e,c))e.className=(e.className?e.className+' ':'')+c;},"
-		"remove:function(c){e.className=(' '+(e.className||'')+' ').replace(' '+String(c)+' ',' ').trim();}};}"
+		"add:function(){var a=cls(e);for(var i=0;i<arguments.length;i++){var c=String(arguments[i]);if(c&&a.indexOf(c)<0)a.push(c);}setCls(e,a);},"
+		"remove:function(){var r=[].map.call(arguments,String);setCls(e,cls(e).filter(function(c){return r.indexOf(c)<0;}));},"
+		"toggle:function(c,f){c=String(c);var a=cls(e),i=a.indexOf(c),add=f===void 0?i<0:!!f;if(add&&i<0)a.push(c);else if(!add&&i>=0)a.splice(i,1);setCls(e,a);return add;},"
+		"replace:function(o,n){var a=cls(e),i=a.indexOf(String(o));if(i<0)return false;a[i]=String(n);setCls(e,a);return true;},"
+		"item:function(i){return cls(e)[i]||null;},forEach:function(f,t){cls(e).forEach(function(c,i){f.call(t,c,i,this);},this);},toString:function(){return e.className||'';}};}"
 		"if(Object.defineProperty&&!Object.getOwnPropertyDescriptor(Element.prototype,'classList'))"
 		"Object.defineProperty(Element.prototype,'classList',{get:function(){return cl(this);}});"
 		"function attr(e,n){return e.getAttribute?e.getAttribute(n):(e.attributes&&e.attributes[n])||e[n]||null;}"
@@ -3497,9 +3569,9 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"(n==='class'?this.className:(this[n]!==void 0?String(this[n]):null));};"
 		"Element.prototype.setAttribute=Element.prototype.setAttribute||function(n,v){n=String(n);v=String(v);"
 		"this.attributes=this.attributes||{};this.attributes[n]=v;if(n==='id')this.id=v;"
-		"else if(n==='class')this.className=v;else if(n==='href'&&(this.tagName||'').toUpperCase()==='A')setAnchor(this,v);else this[n]=v;};"
+		"else if(n==='class')this.className=v;else if(n==='href'&&(this.tagName||'').toUpperCase()==='A')setAnchor(this,v);else this[n]=v;syncData(this,n,v);};"
 		"Element.prototype.removeAttribute=Element.prototype.removeAttribute||function(n){"
-		"n=String(n);if(this.attributes)delete this.attributes[n];};"
+		"n=String(n);if(this.attributes)delete this.attributes[n];if(n==='id')this.id='';else if(n==='class')this.className='';delData(this,n);};"
 		"Element.prototype.hasAttribute=Element.prototype.hasAttribute||function(n){"
 		"n=String(n);return !!(this.attributes&&this.attributes.hasOwnProperty(n));};"
 		"Element.prototype.focus=Element.prototype.focus||noop;Element.prototype.blur=Element.prototype.blur||noop;"
@@ -3570,7 +3642,7 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"return c;}"
 		"function el(tag){var e=Object.create(HTMLElement.prototype);tag=String(tag||'').toUpperCase();"
 		"e.nodeType=1;e.tagName=tag;e.nodeName=tag;e.childNodes=arr();"
-		"e.children=e.childNodes;e.style=css();e.attributes={};"
+		"e.children=e.childNodes;e.style=css();e.attributes={};e.dataset={};"
 		"if(tag==='SELECT')e.options=e.childNodes;"
 		"e.parentNode=null;e.ownerDocument=g.document||null;e.textContent='';"
 		"e.parentElement=null;e.firstChild=null;e.lastChild=null;e.firstElementChild=null;e.lastElementChild=null;"
@@ -3583,10 +3655,10 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"e.removeChild=function(c){var i=e.childNodes.indexOf(c);if(i>=0){e.childNodes.splice(i,1);"
 		"c.parentNode=null;c.parentElement=null;resyncKids(e);}return c;};"
 		"e.setAttribute=function(n,v){n=String(n);v=String(v);e.attributes[n]=v;if(n==='id')e.id=v;else if(n==='class')e.className=v;"
-		"else if(n==='href'&&tag==='A')setAnchor(e,v);else if(n==='for')e.htmlFor=v;else e[n]=v;};"
+		"else if(n==='href'&&tag==='A')setAnchor(e,v);else if(n==='for')e.htmlFor=v;else e[n]=v;syncData(e,n,v);};"
 		"e.getAttribute=function(n){n=String(n);return e.attributes.hasOwnProperty(n)?e.attributes[n]:null;};"
 		"e.hasAttribute=function(n){return e.attributes.hasOwnProperty(String(n));};"
-		"e.removeAttribute=function(n){delete e.attributes[String(n)];};"
+		"e.removeAttribute=function(n){n=String(n);delete e.attributes[n];if(n==='id')e.id='';else if(n==='class')e.className='';delData(e,n);};"
 		"eventful(e);"
 		"e.focus=noop;e.blur=noop;"
 		"e.querySelector=function(s){var r=tagSearch(e,s);return r.length?r[0]:null;};e.querySelectorAll=function(s){return tagSearch(e,s);};"
