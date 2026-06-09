@@ -51,6 +51,7 @@ struct leonos_fetch_context {
     bool locked;
     bool synthetic_empty;
     unsigned int open_retries;
+    unsigned int order;
     bool open_wait_logged;
 #ifdef LEONOS_USER_APP
     uint32_t stream_handle;
@@ -72,6 +73,7 @@ static struct leonos_fetch_context *leonos_fetch_ring;
 static unsigned int leonos_fetch_css_count;
 static unsigned int leonos_fetch_js_count;
 static unsigned int leonos_fetch_js_completion_cooldown;
+static unsigned int leonos_fetch_next_order;
 
 #ifdef LEONOS_USER_APP
 static void leonos_fetch_copy_meta(struct leonos_fetch_context *ctx,
@@ -455,6 +457,65 @@ static bool leonos_fetch_url_is_roblox_landing_script(const char *url)
            strstr(url, "ReactLanding.") != NULL;
 }
 
+static unsigned int leonos_fetch_roblox_pre_core_priority(const char *url)
+{
+    if (url == NULL) {
+        return 0u;
+    }
+
+    if (strstr(url, "js.rbxcdn.com/") == NULL) {
+        return strstr(url, "roblox.com/js/hsts.js") != NULL ? 969u : 0u;
+    }
+
+    if (strstr(url, "EnvironmentUrls.") != NULL) {
+        return 983u;
+    }
+    if (strstr(url, "0496306d944faeb488779bad1af0738e") != NULL) {
+        return 981u;
+    }
+    if (strstr(url, "5c8a2ba3737908f693394045e81ebd71c77cde6f87550ea51f7833e8c98200ae") != NULL) {
+        return 979u;
+    }
+    if (strstr(url, "2f0fd0c2760ff1898187af6df3b764f4b08f77a315d0a33654f105f61b0ea6d0") != NULL) {
+        return 977u;
+    }
+    if (strstr(url, "HeaderScripts.") != NULL) {
+        return 975u;
+    }
+    if (strstr(url, "f85ce090699c1c3962762b8a2f8b252f0f2a7d0424c146f41d6c5abbf0147a57") != NULL) {
+        return 973u;
+    }
+    if (strstr(url, "Theme.") != NULL) {
+        return 971u;
+    }
+    if (strstr(url, "1d87d1231072878a0f6164e84b8cfa6f90a1b31b18ba5d8f410b947d4b029fe8") != NULL) {
+        return 967u;
+    }
+    if (strstr(url, "4bae454bf5dab3028073fea1e91b6f19") != NULL) {
+        return 965u;
+    }
+    if (strstr(url, "730a5206adda5785166891801b1e0f9ae622a95558b260a144db60278b243f5f") != NULL) {
+        return 963u;
+    }
+    if (strstr(url, "TranslationResources.") != NULL) {
+        return 961u;
+    }
+    if (strstr(url, "9731c232fa99c58b0dafafc81cc7905b") != NULL) {
+        return 959u;
+    }
+    if (strstr(url, "bfb3e7a7efed2f8ba4d12dc9fdb70dce1ff97ee13e988833a8638cf3ed8fd7f8") != NULL) {
+        return 957u;
+    }
+    return 0u;
+}
+
+static bool leonos_fetch_url_is_roblox_core_utilities_script(const char *url)
+{
+    return url != NULL &&
+           strstr(url, "js.rbxcdn.com/") != NULL &&
+           strstr(url, "CoreUtilities.") != NULL;
+}
+
 static bool leonos_fetch_url_is_roblox_landing_locale_script(const char *url)
 {
     if (url == NULL || strstr(url, "js.rbxcdn.com/") == NULL) {
@@ -484,6 +545,20 @@ static bool leonos_fetch_url_is_roblox_react_core_script(const char *url)
     return url != NULL &&
            strstr(url, "js.rbxcdn.com/") != NULL &&
            strstr(url, "c27f57f4a397dabc2fe3b74fec93c2401913bdf49373f9339c00b6f18b32d2ac") != NULL;
+}
+
+static bool leonos_fetch_url_is_roblox_pre_react_core_script(const char *url)
+{
+    return url != NULL &&
+           strstr(url, "js.rbxcdn.com/") != NULL &&
+           strstr(url, "41bd9f2b3a9485661a0c9637526141c355311899d473b7a4ad2cca837f5e47f0") != NULL;
+}
+
+static bool leonos_fetch_url_is_roblox_react_shared_script(const char *url)
+{
+    return url != NULL &&
+           strstr(url, "js.rbxcdn.com/") != NULL &&
+           strstr(url, "63b59480fef503ff6648900d1051bae7531757a38ce24f77587552fca279d16c") != NULL;
 }
 
 static bool leonos_fetch_url_is_roblox_post_react_dependency_script(const char *url)
@@ -968,9 +1043,14 @@ static void *leonos_fetch_setup(struct fetch *parent_fetch, nsurl *url,
 
     ctx->parent_fetch = parent_fetch;
     ctx->url = nsurl_ref(url);
+    ctx->order = leonos_fetch_next_order++;
+    if (leonos_fetch_next_order == 0u) {
+        leonos_fetch_next_order = 1u;
+    }
     if (!leonos_fetch_url_looks_subresource(nsurl_access(url))) {
         leonos_fetch_css_count = 0u;
         leonos_fetch_js_count = 0u;
+        leonos_fetch_next_order = 1u;
     } else if (leonos_fetch_url_looks_css(nsurl_access(url))) {
         leonos_fetch_css_count += 1u;
         if (leonos_fetch_url_is_roblox_deferred_style(nsurl_access(url)) ||
@@ -1122,10 +1202,24 @@ static bool leonos_fetch_process(struct leonos_fetch_context *ctx)
     return true;
 }
 
+static bool leonos_fetch_priority_has_begun(
+        const struct leonos_fetch_context *ctx)
+{
+#ifdef LEONOS_USER_APP
+    if (ctx->begun && ctx->stream_handle == 0u && ctx->data_len == 0u &&
+        !ctx->completed && !ctx->synthetic_empty) {
+        return false;
+    }
+#endif
+    return ctx->begun;
+}
+
 static unsigned int leonos_fetch_priority(
         const struct leonos_fetch_context *ctx)
 {
     const char *url = nsurl_access(ctx->url);
+    bool begun = leonos_fetch_priority_has_begun(ctx);
+    unsigned int roblox_priority;
 
     if (ctx->locked) {
         return 0u;
@@ -1140,32 +1234,45 @@ static unsigned int leonos_fetch_priority(
     }
     if (leonos_fetch_url_looks_css(url)) {
         if (ctx->synthetic_empty) {
-            return ctx->begun ? 890u : 880u;
+            return begun ? 890u : 880u;
         }
-        return ctx->begun ? 990u : 985u;
+        return begun ? 990u : 985u;
     }
     if (leonos_fetch_url_looks_js(url)) {
-        if (leonos_fetch_url_is_roblox_landing_locale_script(url)) {
-            return ctx->begun ? 970u : 960u;
+        roblox_priority = leonos_fetch_roblox_pre_core_priority(url);
+        if (roblox_priority != 0u) {
+            return begun ? roblox_priority + 1u : roblox_priority;
+        }
+        if (leonos_fetch_url_is_roblox_core_utilities_script(url)) {
+            return begun ? 956u : 955u;
+        }
+        if (leonos_fetch_url_is_roblox_pre_react_core_script(url)) {
+            return begun ? 954u : 953u;
         }
         if (leonos_fetch_url_is_roblox_react_core_script(url)) {
-            return ctx->begun ? 969u : 968u;
+            return begun ? 952u : 951u;
+        }
+        if (leonos_fetch_url_is_roblox_react_shared_script(url)) {
+            return begun ? 950u : 949u;
+        }
+        if (leonos_fetch_url_is_roblox_landing_locale_script(url)) {
+            return begun ? 946u : 945u;
         }
         if (leonos_fetch_url_is_roblox_landing_dependency_script(url)) {
             if (leonos_fetch_url_is_roblox_post_react_dependency_script(url)) {
-                return ctx->begun ? 958u : 948u;
+                return begun ? 948u : 947u;
             }
-            return ctx->begun ? 965u : 955u;
+            return begun ? 944u : 943u;
         }
         if (leonos_fetch_url_is_roblox_landing_route_script(url)) {
-            return ctx->begun ? 950u : 940u;
+            return begun ? 942u : 941u;
         }
         if (leonos_fetch_url_is_roblox_landing_script(url)) {
-            return ctx->begun ? 940u : 930u;
+            return begun ? 940u : 939u;
         }
-        return ctx->begun ? 740u : 730u;
+        return begun ? 740u : 730u;
     }
-    return ctx->begun ? 260u : 250u;
+    return begun ? 260u : 250u;
 }
 
 static bool leonos_fetch_has_pending_css(void)
@@ -1201,7 +1308,8 @@ static struct leonos_fetch_context *leonos_fetch_pick_next(void)
     ctx = leonos_fetch_ring;
     do {
         unsigned int priority = leonos_fetch_priority(ctx);
-        if (best == NULL || priority > best_priority) {
+        if (best == NULL || priority > best_priority ||
+            (priority == best_priority && ctx->order < best->order)) {
             best = ctx;
             best_priority = priority;
         }
