@@ -12,6 +12,16 @@ extern int main(int argc, char **argv);
 #define LEONOS_NETSURF_DEFAULT_JAVASCRIPT 0
 #endif
 
+static void leonos_drain_startup_events(void)
+{
+    struct leonos_event event;
+    unsigned int guard = 0;
+
+    while (guard < 64u && leonos_event_poll(&event) != 0u) {
+        guard += 1u;
+    }
+}
+
 int leonos_user_main(void)
 {
     static char arg0[] = "netsurf-monkey";
@@ -25,6 +35,7 @@ int leonos_user_main(void)
     static char *argv[] = { arg0, arg1, arg2, 0 };
 
     leonos_write("NETSURF.LEO NetSurf monkey frontend starting\r\n");
+    leonos_drain_startup_events();
     int rc = main(3, argv);
     leonos_write("NETSURF.LEO NetSurf monkey frontend returned\r\n");
     return rc;

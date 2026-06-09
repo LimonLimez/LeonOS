@@ -42,6 +42,14 @@ enum leonos_net_fetch_flags {
     LEONOS_NET_FETCH_FLAG_TRUNCATED = 0x00000008u
 };
 
+enum leonos_event_type {
+    LEONOS_EVENT_NONE = 0,
+    LEONOS_EVENT_TIMER = 1,
+    LEONOS_EVENT_KEYBOARD = 2,
+    LEONOS_EVENT_MOUSE = 3,
+    LEONOS_EVENT_MOUSE_BUTTON = 4
+};
+
 struct leonos_fb_info {
     leonos_u32 width;
     leonos_u32 height;

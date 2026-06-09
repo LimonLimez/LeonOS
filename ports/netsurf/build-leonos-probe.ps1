@@ -889,6 +889,7 @@ function Ensure-NetSurfLeonOsSourcePatches {
     $RedrawSource = Join-Path $NetSurfRoot "content\handlers\html\redraw.c"
     $ScriptSource = Join-Path $NetSurfRoot "content\handlers\html\script.c"
     $ScrollbarSource = Join-Path $NetSurfRoot "desktop\scrollbar.c"
+    $MainSource = Join-Path $NetSurfRoot "frontends\monkey\main.c"
     $PlotSource = Join-Path $NetSurfRoot "frontends\monkey\plot.c"
     $BrowserSource = Join-Path $NetSurfRoot "frontends\monkey\browser.c"
     $BrowserHeader = Join-Path $NetSurfRoot "frontends\monkey\browser.h"
@@ -914,6 +915,9 @@ function Ensure-NetSurfLeonOsSourcePatches {
     }
     if (-not (Test-Path -LiteralPath $ScrollbarSource)) {
         throw "NetSurf scrollbar source missing at $ScrollbarSource."
+    }
+    if (-not (Test-Path -LiteralPath $MainSource)) {
+        throw "NetSurf monkey main source missing at $MainSource."
     }
     if (-not (Test-Path -LiteralPath $PlotSource)) {
         throw "NetSurf monkey plot source missing at $PlotSource."
@@ -2126,6 +2130,23 @@ static bool leonos_script_async_blocks_later(hlcache_handle *script)
         $BrowserHeaderText = $BrowserHeaderText.Replace($OldHeaderBlock, $NewHeaderBlock)
         [System.IO.File]::WriteAllText($BrowserHeader, $BrowserHeaderText, [System.Text.Encoding]::ASCII)
     }
+    if ($BrowserHeaderText -notmatch 'monkey_window_process_leonos_event') {
+        $OldHeaderPrototype = @'
+void monkey_window_handle_command(int argc, char **argv);
+'@
+        $OldHeaderPrototype = $OldHeaderPrototype -replace "`r`n", "`n"
+        $NewHeaderPrototype = @'
+void monkey_window_process_leonos_event(unsigned int type,
+		unsigned int data0, unsigned int data1);
+void monkey_window_handle_command(int argc, char **argv);
+'@
+        $NewHeaderPrototype = $NewHeaderPrototype -replace "`r`n", "`n"
+        if (-not $BrowserHeaderText.Contains($OldHeaderPrototype)) {
+            throw "Could not patch NetSurf monkey browser LeonOS event prototype."
+        }
+        $BrowserHeaderText = $BrowserHeaderText.Replace($OldHeaderPrototype, $NewHeaderPrototype)
+        [System.IO.File]::WriteAllText($BrowserHeader, $BrowserHeaderText, [System.Text.Encoding]::ASCII)
+    }
 
     $BrowserText = [System.IO.File]::ReadAllText($BrowserSource) -replace "`r`n", "`n"
     if ($BrowserText -notmatch '#include "monkey/schedule.h"') {
@@ -2320,7 +2341,237 @@ monkey_window_redraw_scheduled(void *p)
         }
         $BrowserText = $BrowserText.Replace($OldLabel, $NewLabel)
     }
+    if ($BrowserText -notmatch 'leonos_scancode_to_netsurf_key') {
+        $OldCommandBlock = @'
+void
+monkey_window_handle_command(int argc, char **argv)
+'@
+        $OldCommandBlock = $OldCommandBlock -replace "`r`n", "`n"
+        $NewLeonOsEventBlock = @'
+#ifdef WITH_LEONOS_FETCHER
+static uint32_t
+leonos_scancode_to_netsurf_key(unsigned int scancode)
+{
+	switch (scancode) {
+	case 0x01: return NS_KEY_ESCAPE;
+	case 0x0e: return NS_KEY_DELETE_LEFT;
+	case 0x0f: return NS_KEY_TAB;
+	case 0x1c: return NS_KEY_NL;
+	case 0x39: return ' ';
+	case 0x48: return NS_KEY_UP;
+	case 0x4b: return NS_KEY_LEFT;
+	case 0x4d: return NS_KEY_RIGHT;
+	case 0x50: return NS_KEY_DOWN;
+	case 0x02: return '1';
+	case 0x03: return '2';
+	case 0x04: return '3';
+	case 0x05: return '4';
+	case 0x06: return '5';
+	case 0x07: return '6';
+	case 0x08: return '7';
+	case 0x09: return '8';
+	case 0x0a: return '9';
+	case 0x0b: return '0';
+	case 0x0c: return '-';
+	case 0x0d: return '=';
+	case 0x10: return 'q';
+	case 0x11: return 'w';
+	case 0x12: return 'e';
+	case 0x13: return 'r';
+	case 0x14: return 't';
+	case 0x15: return 'y';
+	case 0x16: return 'u';
+	case 0x17: return 'i';
+	case 0x18: return 'o';
+	case 0x19: return 'p';
+	case 0x1a: return '[';
+	case 0x1b: return ']';
+	case 0x1e: return 'a';
+	case 0x1f: return 's';
+	case 0x20: return 'd';
+	case 0x21: return 'f';
+	case 0x22: return 'g';
+	case 0x23: return 'h';
+	case 0x24: return 'j';
+	case 0x25: return 'k';
+	case 0x26: return 'l';
+	case 0x27: return ';';
+	case 0x28: return '\'';
+	case 0x29: return '`';
+	case 0x2b: return '\\';
+	case 0x2c: return 'z';
+	case 0x2d: return 'x';
+	case 0x2e: return 'c';
+	case 0x2f: return 'v';
+	case 0x30: return 'b';
+	case 0x31: return 'n';
+	case 0x32: return 'm';
+	case 0x33: return ',';
+	case 0x34: return '.';
+	case 0x35: return '/';
+	default: return 0;
+	}
+}
+
+static struct gui_window *
+leonos_window_first(void)
+{
+	return gw_ring;
+}
+
+static int
+leonos_window_translate_point(unsigned int data0, unsigned int data1,
+		int *x, int *y)
+{
+	int lx = (int)data0 - (int)LEONOS_NETSURF_VIEW_X;
+	int ly = (int)(data1 & 0xffffu) - (int)LEONOS_NETSURF_VIEW_Y;
+	if (lx < 0 || ly < 0) {
+		return 0;
+	}
+	*x = lx;
+	*y = ly;
+	return 1;
+}
+
+void
+monkey_window_process_leonos_event(unsigned int type,
+		unsigned int data0, unsigned int data1)
+{
+	struct gui_window *gw = leonos_window_first();
+	int x;
+	int y;
+
+	if (gw == NULL) {
+		return;
+	}
+
+	if (type == LEONOS_EVENT_MOUSE) {
+		if (!leonos_window_translate_point(data0, data1, &x, &y)) {
+			return;
+		}
+		browser_window_mouse_track(gw->bw, BROWSER_MOUSE_HOVER, x, y);
+		moutf(MOUT_WINDOW, "LEONOS_EVENT MOUSE WIN %u X %d Y %d",
+		      gw->win_num, x, y);
+	} else if (type == LEONOS_EVENT_MOUSE_BUTTON) {
+		unsigned int buttons = (data1 >> 16) & 0xffu;
+		unsigned int prev = (data1 >> 24) & 0xffu;
+		if (!leonos_window_translate_point(data0, data1, &x, &y)) {
+			return;
+		}
+		if ((buttons & 1u) != 0u && (prev & 1u) == 0u) {
+			browser_window_mouse_track(gw->bw, BROWSER_MOUSE_PRESS_1,
+						   x, y);
+			moutf(MOUT_WINDOW,
+			      "LEONOS_EVENT MOUSE_DOWN WIN %u X %d Y %d",
+			      gw->win_num, x, y);
+		}
+		if ((buttons & 1u) == 0u && (prev & 1u) != 0u) {
+			browser_window_mouse_click(gw->bw, BROWSER_MOUSE_CLICK_1,
+						   x, y);
+			monkey_window_redraw_content(gw, NULL);
+			moutf(MOUT_WINDOW,
+			      "LEONOS_EVENT CLICK WIN %u X %d Y %d",
+			      gw->win_num, x, y);
+		}
+	} else if (type == LEONOS_EVENT_KEYBOARD) {
+		uint32_t key = leonos_scancode_to_netsurf_key(data0);
+		if (key == 0) {
+			return;
+		}
+		(void)browser_window_key_press(gw->bw, key);
+		monkey_window_redraw_content(gw, NULL);
+		moutf(MOUT_WINDOW, "LEONOS_EVENT KEY WIN %u SCAN %u KEY %u",
+		      gw->win_num, data0, (unsigned int)key);
+	}
+}
+#endif
+
+void
+monkey_window_handle_command(int argc, char **argv)
+'@
+        $NewLeonOsEventBlock = $NewLeonOsEventBlock -replace "`r`n", "`n"
+        if (-not $BrowserText.Contains($OldCommandBlock)) {
+            throw "Could not patch NetSurf monkey browser LeonOS event handler."
+        }
+        $BrowserText = $BrowserText.Replace($OldCommandBlock, $NewLeonOsEventBlock)
+    }
+    $BrowserText = $BrowserText.Replace(
+        "case 0x1c: return NS_KEY_CR;",
+        "case 0x1c: return NS_KEY_NL;")
     [System.IO.File]::WriteAllText($BrowserSource, $BrowserText, [System.Text.Encoding]::ASCII)
+
+    $MainText = [System.IO.File]::ReadAllText($MainSource) -replace "`r`n", "`n"
+    if ($MainText -notmatch '#include "leonos_user.h"') {
+        $OldMainInclude = '#include "monkey/layout.h"'
+        $NewMainInclude = @'
+#include "monkey/layout.h"
+#ifdef WITH_LEONOS_FETCHER
+#include "leonos_user.h"
+#endif
+'@
+        $NewMainInclude = $NewMainInclude -replace "`r`n", "`n"
+        if (-not $MainText.Contains($OldMainInclude)) {
+            throw "Could not patch NetSurf monkey main LeonOS include."
+        }
+        $MainText = $MainText.Replace($OldMainInclude, $NewMainInclude.TrimEnd())
+    }
+    if ($MainText -notmatch 'monkey_window_process_leonos_event') {
+        $OldScheduleRun = @'
+		/* discover the next scheduled event time */
+		schedtm = monkey_schedule_run();
+'@
+        $OldScheduleRun = $OldScheduleRun -replace "`r`n", "`n"
+        $NewScheduleRun = @'
+		/* discover the next scheduled event time */
+		schedtm = monkey_schedule_run();
+#ifdef WITH_LEONOS_FETCHER
+		for (unsigned int handled = 0; handled < 16; handled++) {
+			struct leonos_event event;
+			if (leonos_event_poll(&event) == 0u) {
+				break;
+			}
+			monkey_window_process_leonos_event(event.type,
+					event.data0, event.data1);
+			schedtm = 0;
+		}
+#endif
+'@
+        $NewScheduleRun = $NewScheduleRun -replace "`r`n", "`n"
+        if (-not $MainText.Contains($OldScheduleRun)) {
+            throw "Could not patch NetSurf monkey main LeonOS event polling."
+        }
+        $MainText = $MainText.Replace($OldScheduleRun, $NewScheduleRun)
+    }
+    if ($MainText -notmatch 'POLL LEONOS IDLE') {
+        $OldBlockingCase = @'
+		case -1:
+			NSLOG(netsurf, INFO, "Iterate blocking");
+			moutf(MOUT_GENERIC, "POLL BLOCKING");
+			timeout = NULL;
+			break;
+'@
+        $OldBlockingCase = $OldBlockingCase -replace "`r`n", "`n"
+        $NewBlockingCase = @'
+		case -1:
+			NSLOG(netsurf, INFO, "Iterate blocking");
+#ifdef WITH_LEONOS_FETCHER
+			moutf(MOUT_GENERIC, "POLL LEONOS IDLE");
+			tv.tv_sec = 0;
+			tv.tv_usec = 16000;
+			timeout = &tv;
+#else
+			moutf(MOUT_GENERIC, "POLL BLOCKING");
+			timeout = NULL;
+#endif
+			break;
+'@
+        $NewBlockingCase = $NewBlockingCase -replace "`r`n", "`n"
+        if (-not $MainText.Contains($OldBlockingCase)) {
+            throw "Could not patch NetSurf monkey main LeonOS idle polling."
+        }
+        $MainText = $MainText.Replace($OldBlockingCase, $NewBlockingCase)
+    }
+    [System.IO.File]::WriteAllText($MainSource, $MainText, [System.Text.Encoding]::ASCII)
 }
 
 function ConvertTo-NetSurfSources {
