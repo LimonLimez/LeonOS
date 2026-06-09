@@ -145,6 +145,10 @@ static bool qjs_should_skip_blocking_script(const char *name,
 	     strstr(name, "UserProfiles.js") != NULL ||
 	     strstr(name, "Navigation.js") != NULL ||
 	     strstr(name, "Sentry.js") != NULL ||
+	     strstr(name, "SearchLandingPage.js") != NULL ||
+	     strstr(name, "63b59480fef503ff6648900d1051bae7531757a38ce24f77587552fca279d16c") != NULL ||
+	     strstr(name, "CoreUtilities.js") != NULL ||
+	     strstr(name, "ReactStyleGuide.js") != NULL ||
 	     strstr(name, "Thumbnails.js") != NULL ||
 	     strstr(name, "PresenceStatus.js") != NULL ||
 	     strstr(name, "RealTime.js") != NULL ||
@@ -170,6 +174,10 @@ static bool qjs_should_skip_blocking_script(const char *name,
 	return qjs_mem_contains(source, bytes, "bundleDetected(\"UserProfiles\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"Navigation\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"Sentry\")") ||
+	       qjs_mem_contains(source, bytes, "bundleDetected(\"SearchLandingPage\")") ||
+	       qjs_mem_contains(source, bytes, "bundleDetected(\"WebBlox\")") ||
+	       qjs_mem_contains(source, bytes, "bundleDetected(\"CoreUtilities\")") ||
+	       qjs_mem_contains(source, bytes, "bundleDetected(\"ReactStyleGuide\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"Thumbnails\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"PresenceStatus\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"RealTime\")") ||
@@ -2666,6 +2674,16 @@ static JSValue qjs_new_dom_node_array(JSContext *ctx)
 	return list;
 }
 
+static JSValue qjs_new_roblox_account_experience_meta(JSContext *ctx)
+{
+	JSValue obj = qjs_new_basic_element(ctx, "META", "", "");
+	JSValue dataset = JS_NewObject(ctx);
+	qjs_set_string(ctx, obj, "name", "account-experience-revamp-data");
+	qjs_set_string(ctx, dataset, "isAccountExperienceRevampEnabled", "true");
+	JS_SetPropertyStr(ctx, obj, "dataset", dataset);
+	return obj;
+}
+
 static JSValue qjs_document_query_selector_all(JSContext *ctx,
 					       JSValueConst this_val,
 					       int argc,
@@ -2687,6 +2705,21 @@ static JSValue qjs_document_query_selector_all(JSContext *ctx,
 	}
 	selector_text = JS_ToCString(ctx, argv[0]);
 	if (selector_text == NULL) {
+		return list;
+	}
+	if (strcmp(selector_text,
+		   "meta[name=\"account-experience-revamp-data\"]") == 0 ||
+	    strcmp(selector_text,
+		   "meta[name='account-experience-revamp-data']") == 0) {
+		JS_DefinePropertyValueUint32(ctx, list, 0u,
+			qjs_new_roblox_account_experience_meta(ctx),
+			JS_PROP_C_W_E);
+#ifdef LEONOS_USER_APP
+		leonos_write("NETSURF QUICKJS QUERYALL ");
+		leonos_write(selector_text);
+		leonos_write(" nodes=synthetic count=1\r\n");
+#endif
+		JS_FreeCString(ctx, selector_text);
 		return list;
 	}
 	if (!qjs_parse_selector_chain(selector_text, &chain)) {
@@ -2842,11 +2875,11 @@ static JSValue qjs_document_get_element_by_id(JSContext *ctx,
 	(void) this_val;
 	if (thread == NULL || thread->htmlc == NULL ||
 	    thread->htmlc->document == NULL || argc < 1) {
-		return qjs_new_basic_element(ctx, "DIV", "", "");
+		return JS_NULL;
 	}
 	id_text = JS_ToCString(ctx, argv[0]);
 	if (id_text == NULL) {
-		return qjs_new_basic_element(ctx, "DIV", "", "");
+		return JS_NULL;
 	}
 	if (dom_string_create((const uint8_t *) id_text,
 			      strlen(id_text), &id) == DOM_NO_ERR) {
@@ -2870,7 +2903,7 @@ static JSValue qjs_document_get_element_by_id(JSContext *ctx,
 		dom_node_unref(element);
 		return obj;
 	}
-	return qjs_new_basic_element(ctx, "DIV", "", "");
+	return JS_NULL;
 }
 
 static JSValue qjs_document_create_element(JSContext *ctx,
@@ -3353,7 +3386,11 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"cs.dataStores.userDataStore=cs.dataStores.userDataStore||{FriendsUserSortType:{StatusFrequents:'StatusFrequents',Status:'Status',Frequents:'Frequents',Name:'Name'}};"
 		"cs.dataStores.userDataStoreV2=cs.dataStores.userDataStoreV2||{getFriends:function(){return Promise.resolve({data:{data:[]}});}};"
 		"cs.dataStores.gamesDataStore=cs.dataStores.gamesDataStore||{getGameDetails:function(){return Promise.resolve({data:{data:[]}});},getPlaceDetails:function(){return Promise.resolve({data:[]});}};"
-		"cs.dataStores.localeDataStore=cs.dataStores.localeDataStore||{getSupportedLocales:function(){return Promise.resolve({data:[]});}};"
+		"cs.dataStores.localeDataStore=cs.dataStores.localeDataStore||{};"
+		"cs.dataStores.localeDataStore.getSupportedLocales=cs.dataStores.localeDataStore.getSupportedLocales||function(){return Promise.resolve({data:[]});};"
+		"cs.dataStores.localeDataStore.getLocales=cs.dataStores.localeDataStore.getLocales||function(){return Promise.resolve({data:[]});};"
+		"cs.dataStores.localeDataStore.getLocalesWithCache=cs.dataStores.localeDataStore.getLocalesWithCache||function(){return Promise.resolve([]);};"
+		"cs.dataStores.localeDataStore.getUserLocale=cs.dataStores.localeDataStore.getUserLocale||function(){return Promise.resolve({status:200,data:{signupAndLogin:{locale:'en_us'}}});};"
 		"cs.dataStore.hbacIndexedDB=cs.dataStore.hbacIndexedDB||cs.dataStores.hbacIndexedDB;"
 		"cs.dataStore.userDataStore=cs.dataStore.userDataStore||cs.dataStores.userDataStore;"
 		"cs.dataStore.userDataStoreV2=cs.dataStore.userDataStoreV2||cs.dataStores.userDataStoreV2;"
@@ -3386,6 +3423,17 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"rb.AccountIntegrityChallengeService.Captcha=rb.AccountIntegrityChallengeService.Captcha||{ActionType:{Signup:'Signup'},renderChallenge:function(){return Promise.resolve(false);}};"
 		"rb.Cookies=rb.Cookies||{};rb.Cookies.getBrowserTrackerId=rb.Cookies.getBrowserTrackerId||function(){return '0';};"
 		"rb.Cookies.getGuestId=rb.Cookies.getGuestId||function(){return '0';};rb.Cookies.getCookieValue=rb.Cookies.getCookieValue||function(){return '';};"
+		"rb.LangDynamic=rb.LangDynamic||{};rb.LangDynamicDefault=rb.LangDynamicDefault||{};rb.Lang=rb.Lang||{};"
+		"function langFill(ns,m){var cur=rb.LangDynamic[ns]||rb.Lang[ns]||rb.LangDynamicDefault[ns]||{};for(var k in m)if(cur[k]===void 0)cur[k]=m[k];rb.LangDynamic[ns]=cur;return cur;}"
+		"langFill('Feature.Landing',{'Action.LogIn':'Log In','Action.SignUp':'Sign Up','Action.Cancel':'Cancel','Action.Continue':'Continue','Label.Play':'Play','Label.About':'About','Label.Platforms':'Platforms','Heading.WhatIsRoblox':'What is Roblox?','Heading.LeavingRoblox':'You are leaving Roblox','Label.BrazilContentRatingLogoTitle':'ADVISORY RATING: 12 YEARS OLD','Label.BrazilContentRatingLogoSubtitle':'Online purchases','Label.ItalyContentRatingLogoTitle':'In-Experience Purchases','Description.ExternalWebsiteRedirect':'You will be redirected to an external website.'});"
+		"langFill('Authentication.SignUp',{'Action.SignUp':'Sign Up','Action.LogIn':'Log In','Label.Username':'Username','Label.Password':'Password','Label.Birthday':'Birthday','Label.Month':'Month','Label.Day':'Day','Label.Year':'Year','Label.Gender':'Gender','Label.Female':'Female','Label.Male':'Male','Message.Username':'Username','Message.Password':'Password'});"
+		"langFill('Authentication.Login',{'Action.LogIn':'Log In','Label.Username':'Username','Label.Password':'Password'});"
+		"langFill('Authentication.AccountSwitch',{'Action.LogIn':'Log In','Action.SwitchAccount':'Switch Account'});"
+		"langFill('Common.Captcha',{'Action.Verify':'Verify','Message.VerificationRequired':'Verification required'});"
+		"langFill('CommonUI.Controls',{'Action.Ok':'OK','Action.Cancel':'Cancel','Action.Close':'Close','Action.Continue':'Continue'});"
+		"rb.Lang.get=rb.Lang.get||function(k){return String(k||'');};"
+		"rb.Lang.getTranslationResource=rb.Lang.getTranslationResource||function(n){return rb.LangDynamic[String(n||'')]||{};};"
+		"rb.Lang.getResource=rb.Lang.getResource||rb.Lang.getTranslationResource;rb.Lang.translate=rb.Lang.translate||rb.Lang.get;"
 		"rb.Thumbnails=rb.Thumbnails||{};rb.Thumbnails.Thumbnail2d=rb.Thumbnails.Thumbnail2d||function(){return null;};"
 		"rb.Thumbnails.ThumbnailTypes=rb.Thumbnails.ThumbnailTypes||{gameIcon:'gameIcon',gameThumbnail:'gameThumbnail',assetThumbnail:'assetThumbnail',avatarHeadshot:'avatarHeadshot'};"
 		"rb.Thumbnails.ThumbnailFormat=rb.Thumbnails.ThumbnailFormat||{jpeg:'jpeg',webp:'webp',png:'png'};"
@@ -3401,11 +3449,19 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"g.ReactStyleGuide.Button.variants=g.ReactStyleGuide.Button.variants||{primary:'primary',secondary:'secondary',control:'control',alert:'alert',emphasis:'emphasis'};"
 		"g.ReactStyleGuide.Link=g.ReactStyleGuide.Link||rsgEl('a');g.ReactStyleGuide.Loading=g.ReactStyleGuide.Loading||rsgEl('span');"
 		"g.ReactStyleGuide.Modal=g.ReactStyleGuide.Modal||rsgEl('div');g.ReactStyleGuide.Alert=g.ReactStyleGuide.Alert||rsgEl('div');"
+		"g.ReactStyleGuide.createModal=g.ReactStyleGuide.createModal||function(){var R=g.React;function M(p){return R&&R.createElement?R.createElement('div',p||{},p&&p.children||null):null;}return [M,{open:noop,close:noop}];};"
+		"var rsgTags={Text:'span',Typography:'span',Heading:'h2',Box:'div',Stack:'div',Grid:'div',Card:'div',Paper:'div',Image:'img',IconButton:'button',FormGroup:'div',TextInput:'input',PasswordInput:'input',Select:'select',Checkbox:'input',Tooltip:'span'};"
+		"for(var rsgK in rsgTags)g.ReactStyleGuide[rsgK]=g.ReactStyleGuide[rsgK]||rsgEl(rsgTags[rsgK]);"
 		"rb.ui=rb.ui||{};rb.ui.theme=rb.ui.theme||{spacing:function(){return 0;},palette:{content:{static:{light:'#fff'}}}};"
 		"rb.ui.makeStyles=rb.ui.makeStyles||function(s){function use(){return {};};if(arguments.length===0)return function(){return use;};return use;};"
 		"rb.ui.useTheme=rb.ui.useTheme||function(){return rb.ui.theme;};"
-		"rb.ui.createCache=rb.ui.createCache||function(){return {};};rb.ui.CacheProvider=rb.ui.CacheProvider||rsgEl('div');"
+		"rb.ui.createCache=rb.ui.createCache||function(){return {};};rb.ui.createTheme=rb.ui.createTheme||function(t){return t||rb.ui.theme;};"
+		"rb.ui.styled=rb.ui.styled||function(tag){return function(){return rsgEl(tag||'div');};};"
+		"rb.ui.withStyles=rb.ui.withStyles||function(){return function(C){return C;};};rb.ui.CacheProvider=rb.ui.CacheProvider||rsgEl('div');"
 		"rb.ui.UIThemeProvider=rb.ui.UIThemeProvider||rsgEl('div');rb.ui.ThemeProvider=rb.ui.ThemeProvider||rsgEl('div');"
+		"for(var uiK in rsgTags)rb.ui[uiK]=rb.ui[uiK]||g.ReactStyleGuide[uiK]||rsgEl(rsgTags[uiK]);"
+		"rb.ui.Button=rb.ui.Button||g.ReactStyleGuide.Button;rb.ui.Link=rb.ui.Link||g.ReactStyleGuide.Link;rb.ui.Modal=rb.ui.Modal||g.ReactStyleGuide.Modal;rb.ui.Alert=rb.ui.Alert||g.ReactStyleGuide.Alert;"
+		"g.WebBlox=g.WebBlox||rb.ui;"
 		"var d=g.document=g.document||{};Object.setPrototypeOf&&Object.setPrototypeOf(d,Document.prototype);"
 		"d.nodeType=9;d.readyState='complete';d.cookie=d.cookie||'';d.referrer=d.referrer||'';"
 		"d.compatMode=d.compatMode||'CSS1Compat';"
