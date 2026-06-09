@@ -642,8 +642,7 @@ static bool leonos_fetch_url_is_roblox_deferred_media(const char *url)
             break;
         }
     }
-    return (len >= 4u && strncmp(url + len - 4u, ".ico", 4) == 0) ||
-           strstr(url, "tr.rbxcdn.com/") != NULL ||
+    return strstr(url, "tr.rbxcdn.com/") != NULL ||
            strstr(url, "vignette") != NULL;
 }
 

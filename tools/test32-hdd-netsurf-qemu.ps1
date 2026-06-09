@@ -126,7 +126,8 @@ try {
         if ($Text.Contains("PLOT BITMAP X ")) {
             $SawBitmapPlot = $true
         }
-        if ($Text.Contains("HTML LEONOS DOM REBUILD REFLOW")) {
+        if ($Text.Contains("HTML LEONOS DOM REBUILD REFLOW") -or
+            $Text.Contains("HTML LEONOS DOM MUTATION REFLOW")) {
             $SawDomReflow = $true
         }
         if ($SawFetchBytes -and $SawFetchFinished -and $SawRedrawAfterFetch -and
@@ -191,13 +192,15 @@ try {
         "PLOT BITMAP X ",
         "WINDOW REDRAW WIN 0 STOP",
         "NETSURF QUICKJS EXEC ?inline script?",
-        "HTML LEONOS DOM REBUILD DEFER ACTIVE",
-        "HTML LEONOS DOM REBUILD REFLOW",
         "GENERIC LEONOS STB IMAGE DECODED"
     )) {
         if ($Stdout -notlike "*$Expected*") {
             throw "QEMU did not emit expected serial line: $Expected"
         }
+    }
+    if (-not ($Stdout.Contains("HTML LEONOS DOM REBUILD REFLOW") -or
+              $Stdout.Contains("HTML LEONOS DOM MUTATION REFLOW"))) {
+        throw "QEMU did not emit an expected LeonOS DOM reflow line."
     }
 
     foreach ($Bad in @(

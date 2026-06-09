@@ -1491,7 +1491,32 @@ struct leonos_css_var {
     }
 
     $HtmlText = [System.IO.File]::ReadAllText($HtmlSource) -replace "`r`n", "`n"
-    if ($HtmlText -notmatch 'HTML BEGIN WAIT POST SCRIPT ACTIVE') {
+    $OldHtmlPostScriptWait = @'
+#ifdef LEONOS_USER_APP
+	if (htmlc->base.active != 0) {
+		htmlc->conversion_begun = false;
+		leonos_html_log_u("HTML BEGIN WAIT POST SCRIPT ACTIVE ",
+				  htmlc->base.active);
+		return true;
+	}
+#endif
+
+'@
+    $OldHtmlPostScriptWait = $OldHtmlPostScriptWait -replace "`r`n", "`n"
+    $NewHtmlPostScriptContinue = @'
+#ifdef LEONOS_USER_APP
+	if (htmlc->base.active != 0) {
+		leonos_html_log_u("HTML BEGIN CONTINUE WITH ACTIVE ",
+				  htmlc->base.active);
+	}
+#endif
+
+'@
+    $NewHtmlPostScriptContinue = $NewHtmlPostScriptContinue -replace "`r`n", "`n"
+    if ($HtmlText.Contains($OldHtmlPostScriptWait)) {
+        $HtmlText = $HtmlText.Replace($OldHtmlPostScriptWait, $NewHtmlPostScriptContinue)
+        [System.IO.File]::WriteAllText($HtmlSource, $HtmlText, [System.Text.Encoding]::ASCII)
+    } elseif ($HtmlText -notmatch 'HTML BEGIN CONTINUE WITH ACTIVE') {
         $OldHtmlBegin = @'
 	/* Conversion begins proper at this point */
 	htmlc->conversion_begun = true;
@@ -1511,10 +1536,8 @@ struct leonos_css_var {
 
 #ifdef LEONOS_USER_APP
 	if (htmlc->base.active != 0) {
-		htmlc->conversion_begun = false;
-		leonos_html_log_u("HTML BEGIN WAIT POST SCRIPT ACTIVE ",
+		leonos_html_log_u("HTML BEGIN CONTINUE WITH ACTIVE ",
 				  htmlc->base.active);
-		return true;
 	}
 #endif
 
