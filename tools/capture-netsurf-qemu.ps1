@@ -211,6 +211,10 @@ try {
     if (-not $BootText.Contains("LeonOS shell ready")) {
         throw "QEMU did not reach LeonOS shell ready."
     }
+    $SchedulerText = Wait-LeonOsSerialLog $SerialLog "LeonOS cooperative scheduler OK" 90000
+    if (-not $SchedulerText.Contains("LeonOS cooperative scheduler OK")) {
+        throw "QEMU did not reach LeonOS cooperative scheduler."
+    }
 
     $Writer.WriteLine("sendkey m")
     Wait-QemuMonitorPrompt $Stream 3000

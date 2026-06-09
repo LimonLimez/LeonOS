@@ -19,7 +19,8 @@ param(
     [switch] $NonInteractive,
     [switch] $EnableJavaScriptByDefault,
     [switch] $NoJavaScript,
-    [switch] $UseQuickJsCore
+    [switch] $UseQuickJsCore,
+    [switch] $UseDuktape
 )
 
 Set-StrictMode -Version Latest
@@ -54,7 +55,17 @@ if ($Interactive -and $NonInteractive) {
 if ($NoJavaScript -and $UseQuickJsCore) {
     throw "NoJavaScript and UseQuickJsCore cannot be used together."
 }
+if ($NoJavaScript -and $UseDuktape) {
+    throw "NoJavaScript and UseDuktape cannot be used together."
+}
+if ($UseQuickJsCore -and $UseDuktape) {
+    throw "UseQuickJsCore and UseDuktape cannot be used together."
+}
 $InteractiveMode = $Interactive.IsPresent -or -not $NonInteractive.IsPresent
+$JavaScriptEnabledBuild = -not $NoJavaScript.IsPresent
+$UseQuickJsCoreBuild = $JavaScriptEnabledBuild -and -not $UseDuktape.IsPresent
+$JavaScriptDefaultOn = $JavaScriptEnabledBuild -and
+    ($UseQuickJsCoreBuild -or $EnableJavaScriptByDefault.IsPresent)
 
 function ConvertTo-CStringLiteral {
     param([string] $Text)
@@ -86,8 +97,8 @@ $NetSurfConfigHeader = Join-Path $Out "leonos_netsurf_config.h"
     "#define LEONOS_NETSURF_START_URL `"$((ConvertTo-CStringLiteral $StartUrl))`"",
     "#define LEONOS_NETSURF_SETTLE_POLLS $($SettlePolls)u",
     "#define LEONOS_NETSURF_INTERACTIVE $([int] $InteractiveMode)",
-    "#define LEONOS_NETSURF_HAS_JAVASCRIPT $([int] (-not $NoJavaScript.IsPresent))",
-    "#define LEONOS_NETSURF_DEFAULT_JAVASCRIPT $([int] ($EnableJavaScriptByDefault.IsPresent -and -not $NoJavaScript.IsPresent))",
+    "#define LEONOS_NETSURF_HAS_JAVASCRIPT $([int] $JavaScriptEnabledBuild)",
+    "#define LEONOS_NETSURF_DEFAULT_JAVASCRIPT $([int] $JavaScriptDefaultOn)",
     "#endif"
 ), [System.Text.Encoding]::ASCII)
 
@@ -874,6 +885,7 @@ function Ensure-NetSurfLeonOsSourcePatches {
     $FetchSource = Join-Path $NetSurfRoot "content\fetch.c"
     $CssSource = Join-Path $NetSurfRoot "content\handlers\css\css.c"
     $HtmlSource = Join-Path $NetSurfRoot "content\handlers\html\html.c"
+    $ObjectSource = Join-Path $NetSurfRoot "content\handlers\html\object.c"
     $ScriptSource = Join-Path $NetSurfRoot "content\handlers\html\script.c"
     $PlotSource = Join-Path $NetSurfRoot "frontends\monkey\plot.c"
     $BrowserSource = Join-Path $NetSurfRoot "frontends\monkey\browser.c"
@@ -885,6 +897,9 @@ function Ensure-NetSurfLeonOsSourcePatches {
     }
     if (-not (Test-Path -LiteralPath $HtmlSource)) {
         throw "NetSurf HTML source missing at $HtmlSource."
+    }
+    if (-not (Test-Path -LiteralPath $ObjectSource)) {
+        throw "NetSurf HTML object source missing at $ObjectSource."
     }
     if (-not (Test-Path -LiteralPath $FetchSource)) {
         throw "NetSurf fetch source missing at $FetchSource."
@@ -1504,6 +1519,102 @@ struct leonos_css_var {
         $HtmlText = $HtmlText.Replace($OldHtmlBegin, $NewHtmlBegin)
         [System.IO.File]::WriteAllText($HtmlSource, $HtmlText, [System.Text.Encoding]::ASCII)
     }
+    if ($HtmlText -notmatch 'HTML LEONOS DOM REBUILD DEFER ACTIVE') {
+        $OldLeonOsDomRebuild = @'
+	if (c->leonos_dom_mutation_dirty &&
+	    c->leonos_dom_rebuild_count < LEONOS_DOM_REBUILD_LIMIT) {
+		c->leonos_dom_mutation_dirty = false;
+		err = html_leonos_rebuild_dom_to_box(c);
+		if (err == NSERROR_OK) {
+			leonos_html_log("HTML LEONOS DOM REBUILD START\r\n");
+			return;
+		}
+		leonos_html_log_u("HTML LEONOS DOM REBUILD ERROR ",
+				(unsigned int) err);
+	}
+'@
+        $OldLeonOsDomRebuild = $OldLeonOsDomRebuild -replace "`r`n", "`n"
+        $NewLeonOsDomRebuild = @'
+	if (c->leonos_dom_mutation_dirty &&
+	    c->base.active == 0 &&
+	    c->leonos_dom_rebuild_count < LEONOS_DOM_REBUILD_LIMIT) {
+		c->leonos_dom_mutation_dirty = false;
+		err = html_leonos_rebuild_dom_to_box(c);
+		if (err == NSERROR_OK) {
+			leonos_html_log("HTML LEONOS DOM REBUILD START\r\n");
+			return;
+		}
+		leonos_html_log_u("HTML LEONOS DOM REBUILD ERROR ",
+				(unsigned int) err);
+	} else if (c->leonos_dom_mutation_dirty && c->base.active != 0) {
+		leonos_html_log_u("HTML LEONOS DOM REBUILD DEFER ACTIVE ",
+				(unsigned int) c->base.active);
+	}
+'@
+        $NewLeonOsDomRebuild = $NewLeonOsDomRebuild -replace "`r`n", "`n"
+        if (-not $HtmlText.Contains($OldLeonOsDomRebuild)) {
+            throw "Could not patch NetSurf LeonOS DOM rebuild active-fetch defer."
+        }
+        $HtmlText = $HtmlText.Replace($OldLeonOsDomRebuild, $NewLeonOsDomRebuild)
+
+        $OldLeonOsProceedDone = @'
+	case CONTENT_STATUS_READY:
+		if (html->base.active == 0) {
+			content_set_done(&html->base);
+			return NSERROR_OK;
+		}
+'@
+        $OldLeonOsProceedDone = $OldLeonOsProceedDone -replace "`r`n", "`n"
+        $NewLeonOsProceedDone = @'
+	case CONTENT_STATUS_READY:
+		if (html->base.active == 0) {
+			if (html->leonos_dom_mutation_dirty &&
+			    html->leonos_dom_rebuild_count <
+				    LEONOS_DOM_REBUILD_LIMIT) {
+				nserror error;
+				html->leonos_dom_mutation_dirty = false;
+				error = html_leonos_rebuild_dom_to_box(html);
+				if (error == NSERROR_OK) {
+					leonos_html_log("HTML LEONOS DOM REBUILD START\r\n");
+					return NSERROR_OK;
+				}
+				leonos_html_log_u("HTML LEONOS DOM REBUILD ERROR ",
+						(unsigned int) error);
+			}
+			content_set_done(&html->base);
+			return NSERROR_OK;
+		}
+'@
+        $NewLeonOsProceedDone = $NewLeonOsProceedDone -replace "`r`n", "`n"
+        if (-not $HtmlText.Contains($OldLeonOsProceedDone)) {
+            throw "Could not patch NetSurf LeonOS DOM rebuild proceed-to-done hook."
+        }
+        $HtmlText = $HtmlText.Replace($OldLeonOsProceedDone, $NewLeonOsProceedDone)
+        [System.IO.File]::WriteAllText($HtmlSource, $HtmlText, [System.Text.Encoding]::ASCII)
+    }
+
+    $ObjectText = [System.IO.File]::ReadAllText($ObjectSource) -replace "`r`n", "`n"
+    if ($ObjectText -notmatch 'html_proceed_to_done\(c\);') {
+        $OldObjectDone = @'
+		/* all objects have arrived */
+		content__reformat(&c->base, false, c->base.available_width,
+				c->base.available_height);
+		content_set_done(&c->base);
+'@
+        $OldObjectDone = $OldObjectDone -replace "`r`n", "`n"
+        $NewObjectDone = @'
+		/* all objects have arrived */
+		content__reformat(&c->base, false, c->base.available_width,
+				c->base.available_height);
+		html_proceed_to_done(c);
+'@
+        $NewObjectDone = $NewObjectDone -replace "`r`n", "`n"
+        if (-not $ObjectText.Contains($OldObjectDone)) {
+            throw "Could not patch NetSurf object completion DOM rebuild hook."
+        }
+        $ObjectText = $ObjectText.Replace($OldObjectDone, $NewObjectDone)
+        [System.IO.File]::WriteAllText($ObjectSource, $ObjectText, [System.Text.Encoding]::ASCII)
+    }
 
     $FetchText = [System.IO.File]::ReadAllText($FetchSource) -replace "`r`n", "`n"
     if ($FetchText -notmatch 'leonos_fetcher_register') {
@@ -2045,17 +2156,17 @@ function Get-LeonOsNetSurfMonkeyConfig {
     }
 
     $GeneratedRoot = Join-Path $Out "netsurf-generated"
-    if ($UseQuickJsCore) {
+    if ($UseQuickJsCoreBuild) {
         & (Join-Path $Root "ports\quickjs\fetch-quickjs.ps1") -Version $QuickJsVersion | Write-Host
         if (-not (Test-Path -LiteralPath $QuickJsSource)) {
             throw "QuickJS source missing at $QuickJsSource."
         }
     }
-    $JavascriptSources = if ($NoJavaScript) {
+    $JavascriptSources = if (-not $JavaScriptEnabledBuild) {
         @(
             "content/handlers/javascript/none/none.c"
         )
-    } elseif ($UseQuickJsCore) {
+    } elseif ($UseQuickJsCoreBuild) {
         @(
             "content/handlers/javascript/content.c"
         )
@@ -2209,7 +2320,7 @@ function Get-LeonOsNetSurfMonkeyConfig {
 
     $Sources = @(ConvertTo-NetSurfSources -NetSurfRoot $NetSurfRoot -RelativePaths $RelativeSources)
     $Sources += $LeoStbImageSrc
-    if ($UseQuickJsCore) {
+    if ($UseQuickJsCoreBuild) {
         $Sources += $QuickJsBackendSrc
         $Sources += @(
             (Join-Path $QuickJsSource "quickjs.c"),
@@ -2218,7 +2329,7 @@ function Get-LeonOsNetSurfMonkeyConfig {
             (Join-Path $QuickJsSource "libunicode.c"),
             (Join-Path $QuickJsSource "cutils.c")
         )
-    } elseif (-not $NoJavaScript) {
+    } elseif ($JavaScriptEnabledBuild) {
         $DuktapeGeneratedDir = Join-Path $GeneratedRoot "duktape"
         if (-not (Test-Path -LiteralPath $DuktapeGeneratedDir)) {
             throw "Duktape generated source directory missing at $DuktapeGeneratedDir."
@@ -2269,7 +2380,7 @@ function Get-LeonOsNetSurfMonkeyConfig {
             "WITH_LEONOS_STB_IMAGE",
             "WITH_BMP",
             "WITH_GIF"
-        ) + $(if ($UseQuickJsCore) {
+        ) + $(if ($UseQuickJsCoreBuild) {
             @(
                 "LEONOS_NETSURF_QUICKJS_CORE",
                 "LEONOS_QUICKJS_NO_ATOMICS",
@@ -2279,7 +2390,7 @@ function Get-LeonOsNetSurfMonkeyConfig {
                 "CONFIG_VERSION=\`"$QuickJsVersion\`"",
                 "_GNU_SOURCE"
             )
-        } elseif ($NoJavaScript) { @() } else {
+        } elseif (-not $JavaScriptEnabledBuild) { @() } else {
             @(
                 "DUK_OPT_HAVE_CUSTOM_H"
             )
@@ -2474,7 +2585,7 @@ if ($Libraries -contains "libcss") {
 if ($Libraries -contains "netsurf-monkey") {
     Ensure-NetSurfLeonOsSourcePatches
     Ensure-NetSurfGeneratedFiles
-    if ((-not $NoJavaScript) -and (-not $UseQuickJsCore)) {
+    if ($JavaScriptEnabledBuild -and (-not $UseQuickJsCoreBuild)) {
         Ensure-NetSurfDuktapeGeneratedFiles
     }
 }

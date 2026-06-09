@@ -17,7 +17,7 @@ $ErrorActionPreference = "Stop"
 # LeonOS, then press 'm' to launch NETSURF.LEO from ring 3.
 if (-not $SkipBuild) {
     & (Join-Path $PSScriptRoot "..\ports\netsurf\build-leonos-probe.ps1") `
-        -StartUrl $StartUrl -NonInteractive | Write-Host
+        -StartUrl $StartUrl -Interactive | Write-Host
     & (Join-Path $PSScriptRoot "build32-image.ps1") | Write-Host
     & (Join-Path $PSScriptRoot "build32-hdd.ps1") | Write-Host
 }
@@ -86,6 +86,14 @@ try {
     if (-not $BootText.Contains("LeonOS shell ready")) {
         throw "QEMU did not reach LeonOS shell ready before launch timeout."
     }
+    $SchedulerText = Wait-LeonOsSerialLog $SerialLog "LeonOS cooperative scheduler OK" 90000
+    if ($LiveSerial -and $SchedulerText.Length -gt $LastLiveLength) {
+        Write-Host $SchedulerText.Substring($LastLiveLength)
+        $LastLiveLength = $SchedulerText.Length
+    }
+    if (-not $SchedulerText.Contains("LeonOS cooperative scheduler OK")) {
+        throw "QEMU did not reach LeonOS cooperative scheduler before launch timeout."
+    }
 
     $Writer.WriteLine("sendkey m")
     Wait-QemuMonitorPrompt $Stream 3000
@@ -93,7 +101,6 @@ try {
     $SawFetchBytes = $false
     $SawFetchFinished = $false
     $SawRedrawAfterFetch = $false
-    $SawGenericFinished = $false
     $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $Deadline -and -not $Process.HasExited) {
         $Text = Read-LeonOsSerialLog $SerialLog
@@ -110,11 +117,7 @@ try {
         if ($SawFetchFinished -and $Text.Contains("WINDOW REDRAW WIN 0 STOP")) {
             $SawRedrawAfterFetch = $true
         }
-        if ($Text.Contains("GENERIC FINISHED")) {
-            $SawGenericFinished = $true
-        }
-        if ($SawFetchBytes -and $SawFetchFinished -and
-            $SawRedrawAfterFetch -and $SawGenericFinished) {
+        if ($SawFetchBytes -and $SawFetchFinished -and $SawRedrawAfterFetch) {
             break
         }
         Start-Sleep -Milliseconds 100
@@ -148,7 +151,8 @@ try {
         "LeonOS 32-bit FAT32 volume mounted",
         "LeonOS user mode enter NETSURF.LEO",
         "NETSURF.LEO NetSurf monkey frontend starting",
-        "GENERIC JAVASCRIPT OPTION DISABLED",
+        "GENERIC JAVASCRIPT OPTION ENABLED",
+        "NETSURF QUICKJS CORE HEAP",
         "GENERIC STARTED",
         "WINDOW NEW WIN 0",
         "WINDOW SET_URL WIN 0 URL $StartUrl",
@@ -173,10 +177,10 @@ try {
         "PLOT RECT X0 ",
         "PLOT BITMAP X ",
         "WINDOW REDRAW WIN 0 STOP",
-        "WINDOW JS WIN 0 RET TRUE",
-        "GENERIC FINISHED",
-        "NETSURF.LEO NetSurf monkey frontend returned",
-        "LeonOS user app returned to kernel"
+        "NETSURF QUICKJS EXEC ?inline script?",
+        "HTML LEONOS DOM REBUILD DEFER ACTIVE",
+        "HTML LEONOS DOM REBUILD REFLOW",
+        "GENERIC LEONOS STB IMAGE DECODED"
     )) {
         if ($Stdout -notlike "*$Expected*") {
             throw "QEMU did not emit expected serial line: $Expected"

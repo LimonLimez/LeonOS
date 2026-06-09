@@ -40,11 +40,11 @@ Implemented in LeonOS:
 - framebuffer info/fill/present syscalls;
 - a minimal event-poll syscall;
 - `UGFX.LEO`, a user-mode graphics probe that exercises those syscalls in QEMU;
-- `ports\netsurf\build-leonos-probe.ps1` compiles 821 i386 freestanding objects
+- `ports\netsurf\build-leonos-probe.ps1` compiles 602 i386 freestanding objects
   from real upstream NetSurf project libraries plus NetSurf's real `monkey`
-  browser frontend/core target, Duktape, and generated NetSurf DOM JavaScript
-  bindings. The probe also links a freestanding
-  `dist32\netsurf-probe\netsurf-monkey.elf` from 816 browser objects. SVG
+  browser frontend/core target and the LeonOS QuickJS browser backend. The probe
+  also links a freestanding
+  `dist32\netsurf-probe\netsurf-monkey.elf` from 597 browser objects. SVG
   support-library objects are compiled, but excluded from that link because SVG
   rendering is not enabled and no XML parser is ported yet;
 - the in-kernel LeonOS browser (F11) with TLS, layout, forms, images, and strict
@@ -154,11 +154,12 @@ path, then requires `GENERIC FINISHED` and return to the kernel.
 
 Honest current browser limits:
 
-- Duktape JavaScript is compiled in with generated NetSurf DOM bindings, but it
-  is not enabled by default. Google serves script that times out or uses modern
-  syntax Duktape cannot handle, so LeonOS defaults NetSurf to a static
-  HTML/CSS/image compatibility mode instead of showing a blank JS-failed page.
-  Use `-EnableJavaScriptByDefault` only for experimental JS testing;
+- QuickJS JavaScript is now the default NetSurf browser backend and starts with
+  `--enable_javascript=1`. Google inline scripts execute, DOM lookups work, and
+  native DOM insertion is wired back into NetSurf, but the browser API surface is
+  still incomplete compared with Chromium/Firefox. Use `-NoJavaScript` for a
+  strict static fallback or `-UseDuktape` to debug the older generated-binding
+  backend;
 - no curl fetcher and no generalized socket/TLS API exposed to NetSurf yet; the
   current fetch path is a LeonOS-specific one-handle `SYS_NET_STREAM_*` bridge
   that now polls statefully, returns body bytes plus real status/content-type
