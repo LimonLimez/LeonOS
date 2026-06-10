@@ -37,6 +37,8 @@ struct jsthread {
 	const char *active_script_name;
 	unsigned int active_script_dom_appends;
 	bool active_script_dom_budget_hit;
+	bool active_script_react_landing_attached;
+	dom_node *active_script_react_landing_candidate;
 	bool closed;
 };
 
@@ -52,6 +54,7 @@ static JSValue qjs_new_dom_node_limited(JSContext *ctx, dom_node *node,
 				       unsigned int ancestor_depth,
 				       bool populate_children);
 static uint32_t qjs_array_length(JSContext *ctx, JSValueConst array);
+static void qjs_sync_native_subtree_props(JSContext *ctx, JSValueConst obj);
 
 static int qjs_interrupt_handler(JSRuntime *rt, void *opaque)
 {
@@ -1642,6 +1645,279 @@ static void qjs_sync_native_element_props(JSContext *ctx, JSValueConst obj)
 	qjs_sync_style_attribute(ctx, obj, native->node);
 }
 
+static struct qjs_native_node *qjs_get_native_or_materialized_node(
+		JSContext *ctx,
+		JSValueConst value)
+{
+	struct qjs_native_node *native = qjs_get_native_node(value);
+	JSValue materialized;
+	if (native != NULL) {
+		return native;
+	}
+	if (!JS_IsObject(value)) {
+		return NULL;
+	}
+	materialized = JS_GetPropertyStr(ctx, value, "__leonosNativeNode");
+	native = qjs_get_native_node(materialized);
+	JS_FreeValue(ctx, materialized);
+	return native;
+}
+
+static void qjs_store_materialized_native_node(JSContext *ctx,
+					       JSValueConst value,
+					       dom_node *node)
+{
+	JSValue wrapped;
+	if (!JS_IsObject(value) || node == NULL ||
+	    qjs_get_native_node(value) != NULL) {
+		return;
+	}
+	wrapped = qjs_new_dom_node_limited(ctx, node, 0u, false);
+	if (!JS_IsException(wrapped) && !JS_IsNull(wrapped)) {
+		JS_SetPropertyStr(ctx, value, "__leonosNativeNode", wrapped);
+	} else {
+		JS_FreeValue(ctx, wrapped);
+	}
+}
+
+static void qjs_materialize_sync_attributes(JSContext *ctx,
+					    JSValueConst obj,
+					    dom_node *node)
+{
+	JSValue attributes;
+	JSPropertyEnum *props = NULL;
+	uint32_t prop_count = 0u;
+	if (node == NULL || qjs_native_node_type(node) != DOM_ELEMENT_NODE) {
+		return;
+	}
+	attributes = JS_GetPropertyStr(ctx, obj, "attributes");
+	if (!JS_IsObject(attributes)) {
+		JS_FreeValue(ctx, attributes);
+		return;
+	}
+	if (JS_GetOwnPropertyNames(ctx, &props, &prop_count, attributes,
+				   JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
+		for (uint32_t i = 0u; i < prop_count; i++) {
+			const char *name = JS_AtomToCString(ctx, props[i].atom);
+			JSValue value;
+			char text[1024];
+			if (name == NULL || name[0] == 0) {
+				JS_FreeCString(ctx, name);
+				continue;
+			}
+			value = JS_GetProperty(ctx, attributes, props[i].atom);
+			qjs_copy_js_string(text, sizeof(text), ctx, value);
+			JS_FreeValue(ctx, value);
+			if (text[0] != 0) {
+				qjs_set_native_attribute_cstr(node, name, text);
+			}
+			JS_FreeCString(ctx, name);
+		}
+		JS_FreePropertyEnum(ctx, props, prop_count);
+	}
+	JS_FreeValue(ctx, attributes);
+}
+
+static void qjs_materialize_sync_element_props(JSContext *ctx,
+					       JSValueConst obj,
+					       dom_node *node)
+{
+	if (node == NULL || qjs_native_node_type(node) != DOM_ELEMENT_NODE) {
+		return;
+	}
+	qjs_materialize_sync_attributes(ctx, obj, node);
+	qjs_sync_native_string_attr(ctx, obj, node, "id", "id");
+	qjs_sync_native_string_attr(ctx, obj, node, "className", "class");
+	qjs_sync_native_string_attr(ctx, obj, node, "src", "src");
+	qjs_sync_native_string_attr(ctx, obj, node, "href", "href");
+	qjs_sync_native_string_attr(ctx, obj, node, "alt", "alt");
+	qjs_sync_native_string_attr(ctx, obj, node, "title", "title");
+	qjs_sync_native_string_attr(ctx, obj, node, "type", "type");
+	qjs_sync_native_string_attr(ctx, obj, node, "name", "name");
+	qjs_sync_native_string_attr(ctx, obj, node, "value", "value");
+	qjs_sync_native_string_attr(ctx, obj, node, "defaultValue", "value");
+	qjs_sync_native_string_attr(ctx, obj, node, "placeholder",
+				    "placeholder");
+	qjs_sync_native_string_attr(ctx, obj, node, "role", "role");
+	qjs_sync_native_string_attr(ctx, obj, node, "htmlFor", "for");
+	qjs_sync_native_string_attr(ctx, obj, node, "ariaLabel",
+				    "aria-label");
+	qjs_sync_native_bool_attr(ctx, obj, node, "disabled", "disabled");
+	qjs_sync_native_bool_attr(ctx, obj, node, "checked", "checked");
+	qjs_sync_native_bool_attr(ctx, obj, node, "selected", "selected");
+	qjs_sync_native_bool_attr(ctx, obj, node, "multiple", "multiple");
+	qjs_sync_native_bool_attr(ctx, obj, node, "required", "required");
+	qjs_sync_native_bool_attr(ctx, obj, node, "readOnly", "readonly");
+	qjs_sync_native_bool_attr(ctx, obj, node, "hidden", "hidden");
+	qjs_sync_style_attribute(ctx, obj, node);
+}
+
+static dom_node *qjs_materialize_js_node_with_doc(JSContext *ctx,
+						  JSValueConst value,
+						  dom_document *document,
+						  unsigned int depth)
+{
+	struct qjs_native_node *native;
+	JSValue node_type_value;
+	int32_t node_type = 0;
+	if (document == NULL || depth > 96u ||
+	    JS_IsUndefined(value) || JS_IsNull(value)) {
+		return NULL;
+	}
+	native = qjs_get_native_or_materialized_node(ctx, value);
+	if (native != NULL && native->node != NULL) {
+		qjs_sync_native_subtree_props(ctx, value);
+		return dom_node_ref(native->node);
+	}
+	if (!JS_IsObject(value)) {
+		dom_string *text = NULL;
+		dom_text *text_node = NULL;
+		if (!qjs_dom_string_from_js(ctx, value, &text)) {
+			return NULL;
+		}
+		if (dom_document_create_text_node(document, text,
+						  &text_node) != DOM_NO_ERR) {
+			dom_string_unref(text);
+			return NULL;
+		}
+		dom_string_unref(text);
+		return (dom_node *) text_node;
+	}
+	node_type_value = JS_GetPropertyStr(ctx, value, "nodeType");
+	if (JS_IsUndefined(node_type_value) || JS_IsNull(node_type_value) ||
+	    JS_ToInt32(ctx, &node_type, node_type_value) < 0) {
+		JSValue tag = JS_GetPropertyStr(ctx, value, "tagName");
+		char tag_text[32];
+		qjs_copy_js_string(tag_text, sizeof(tag_text), ctx, tag);
+		JS_FreeValue(ctx, tag);
+		node_type = tag_text[0] != 0 ? DOM_ELEMENT_NODE : 0;
+	}
+	JS_FreeValue(ctx, node_type_value);
+	if (node_type == DOM_TEXT_NODE) {
+		dom_string *text = NULL;
+		dom_text *text_node = NULL;
+		JSValue text_value = JS_GetPropertyStr(ctx, value, "nodeValue");
+		if (JS_IsUndefined(text_value) || JS_IsNull(text_value)) {
+			JS_FreeValue(ctx, text_value);
+			text_value = JS_GetPropertyStr(ctx, value, "textContent");
+		}
+		if (!qjs_dom_string_from_js(ctx, text_value, &text)) {
+			JS_FreeValue(ctx, text_value);
+			return NULL;
+		}
+		JS_FreeValue(ctx, text_value);
+		if (dom_document_create_text_node(document, text,
+						  &text_node) != DOM_NO_ERR) {
+			dom_string_unref(text);
+			return NULL;
+		}
+		dom_string_unref(text);
+		qjs_store_materialized_native_node(ctx, value,
+						   (dom_node *) text_node);
+		return (dom_node *) text_node;
+	}
+	if (node_type == DOM_ELEMENT_NODE ||
+	    node_type == DOM_DOCUMENT_FRAGMENT_NODE) {
+		dom_node *node = NULL;
+		JSValue child_nodes;
+		uint32_t length = 0u;
+		if (node_type == DOM_DOCUMENT_FRAGMENT_NODE) {
+			dom_document_fragment *fragment = NULL;
+			if (dom_document_create_document_fragment(document,
+								  &fragment) !=
+			    DOM_NO_ERR) {
+				return NULL;
+			}
+			node = (dom_node *) fragment;
+		} else {
+			dom_string *tag = NULL;
+			dom_element *element = NULL;
+			JSValue tag_value = JS_GetPropertyStr(ctx, value,
+							      "tagName");
+			char tag_text[64];
+			qjs_copy_js_string(tag_text, sizeof(tag_text), ctx,
+					   tag_value);
+			JS_FreeValue(ctx, tag_value);
+			if (tag_text[0] == 0) {
+				tag_value = JS_GetPropertyStr(ctx, value,
+							      "nodeName");
+				qjs_copy_js_string(tag_text, sizeof(tag_text),
+						   ctx, tag_value);
+				JS_FreeValue(ctx, tag_value);
+			}
+			if (tag_text[0] == 0 || tag_text[0] == '#') {
+				qjs_copy_cstr(tag_text, sizeof(tag_text), "DIV");
+			}
+			if (dom_string_create((const uint8_t *) tag_text,
+					      strlen(tag_text),
+					      &tag) != DOM_NO_ERR) {
+				return NULL;
+			}
+			if (dom_document_create_element(document, tag,
+							&element) != DOM_NO_ERR) {
+				dom_string_unref(tag);
+				return NULL;
+			}
+			dom_string_unref(tag);
+			node = (dom_node *) element;
+			qjs_materialize_sync_element_props(ctx, value, node);
+		}
+		child_nodes = JS_GetPropertyStr(ctx, value, "childNodes");
+		if (JS_IsObject(child_nodes)) {
+			length = qjs_array_length(ctx, child_nodes);
+		}
+		if (node_type == DOM_ELEMENT_NODE && length == 0u) {
+			JSValue text_value = JS_GetPropertyStr(ctx, value,
+							       "textContent");
+			char text[4096];
+			qjs_copy_js_string(text, sizeof(text), ctx, text_value);
+			JS_FreeValue(ctx, text_value);
+			if (text[0] != 0) {
+				dom_string *dom_text = NULL;
+				if (dom_string_create((const uint8_t *) text,
+						      strlen(text),
+						      &dom_text) == DOM_NO_ERR) {
+					(void) dom_node_set_text_content(node,
+									 dom_text);
+					dom_string_unref(dom_text);
+				}
+			}
+		}
+		for (uint32_t i = 0u; i < length; i++) {
+			JSValue child = JS_GetPropertyUint32(ctx, child_nodes, i);
+			dom_node *child_node =
+				qjs_materialize_js_node_with_doc(ctx, child,
+								 document,
+								 depth + 1u);
+			if (child_node != NULL) {
+				dom_node *result = NULL;
+				if (dom_node_append_child(node, child_node,
+							  &result) == DOM_NO_ERR &&
+				    result != NULL) {
+					dom_node_unref(result);
+				}
+				dom_node_unref(child_node);
+			}
+			JS_FreeValue(ctx, child);
+		}
+		JS_FreeValue(ctx, child_nodes);
+		qjs_store_materialized_native_node(ctx, value, node);
+		return node;
+	}
+	return NULL;
+}
+
+static dom_node *qjs_materialize_js_node(JSContext *ctx, JSValueConst value)
+{
+	jsthread *thread = JS_GetContextOpaque(ctx);
+	if (thread == NULL || thread->htmlc == NULL ||
+	    thread->htmlc->document == NULL) {
+		return NULL;
+	}
+	return qjs_materialize_js_node_with_doc(ctx, value,
+						thread->htmlc->document, 0u);
+}
+
 static void qjs_sync_native_subtree_props(JSContext *ctx, JSValueConst obj)
 {
 	JSValue child_nodes;
@@ -1971,6 +2247,196 @@ static void qjs_note_native_node_inserted(JSContext *ctx, dom_node *node)
 	html_leonos_dom_node_inserted(thread->htmlc, node);
 }
 
+static void qjs_log_native_dom_mutation(JSContext *ctx, const char *op,
+					dom_node *parent, dom_node *child)
+{
+#ifdef LEONOS_USER_APP
+	jsthread *thread = JS_GetContextOpaque(ctx);
+	dom_string *parent_name = NULL;
+	dom_string *child_name = NULL;
+	dom_string *parent_id = NULL;
+	char parent_buf[64];
+	char child_buf[64];
+	char parent_id_buf[96];
+	char detail[256];
+	int detail_len;
+	const char *name;
+	if (thread == NULL || parent == NULL || child == NULL) {
+		return;
+	}
+	name = thread->active_script_name;
+	if (name == NULL ||
+	    strstr(name, "js.rbxcdn.com/") == NULL ||
+	    strstr(name, "ReactLanding.") == NULL) {
+		return;
+	}
+	parent_buf[0] = 0;
+	child_buf[0] = 0;
+	parent_id_buf[0] = 0;
+	if (dom_node_get_node_name(parent, &parent_name) == DOM_NO_ERR &&
+	    parent_name != NULL) {
+		qjs_copy_dom_string_cstr(parent_buf, sizeof(parent_buf),
+					 parent_name);
+		dom_string_unref(parent_name);
+	}
+	if (dom_node_get_node_name(child, &child_name) == DOM_NO_ERR &&
+	    child_name != NULL) {
+		qjs_copy_dom_string_cstr(child_buf, sizeof(child_buf),
+					 child_name);
+		dom_string_unref(child_name);
+	}
+	if (qjs_native_node_type(parent) == DOM_ELEMENT_NODE) {
+		qjs_read_dom_attribute((dom_element *) parent, "id",
+				       &parent_id);
+		if (parent_id != NULL) {
+			qjs_copy_dom_string_cstr(parent_id_buf,
+						 sizeof(parent_id_buf),
+						 parent_id);
+			dom_string_unref(parent_id);
+		}
+	}
+	detail_len = snprintf(detail, sizeof(detail),
+		"NETSURF QUICKJS DOM %s native COUNT %u PARENT %s%s%s CHILD %s\r\n",
+		op != NULL ? op : "mutate",
+		thread->active_script_dom_appends,
+		parent_buf[0] != 0 ? parent_buf : "?",
+		parent_id_buf[0] != 0 ? "#" : "",
+		parent_id_buf,
+		child_buf[0] != 0 ? child_buf : "?");
+	if (detail_len > 0) {
+		leonos_write(detail);
+	}
+#else
+	(void) ctx;
+	(void) op;
+	(void) parent;
+	(void) child;
+#endif
+}
+
+static bool qjs_native_node_id_equals(dom_node *node, const char *id)
+{
+	dom_string *value = NULL;
+	char text[128];
+	bool match = false;
+	if (node == NULL || id == NULL ||
+	    qjs_native_node_type(node) != DOM_ELEMENT_NODE) {
+		return false;
+	}
+	qjs_read_dom_attribute((dom_element *) node, "id", &value);
+	if (value == NULL) {
+		return false;
+	}
+	qjs_copy_dom_string_cstr(text, sizeof(text), value);
+	dom_string_unref(value);
+	match = strcmp(text, id) == 0;
+	return match;
+}
+
+static dom_node *qjs_get_element_by_id_node(JSContext *ctx, const char *id)
+{
+	jsthread *thread = JS_GetContextOpaque(ctx);
+	dom_string *dom_id = NULL;
+	dom_element *element = NULL;
+	if (thread == NULL || thread->htmlc == NULL ||
+	    thread->htmlc->document == NULL || id == NULL) {
+		return NULL;
+	}
+	if (dom_string_create((const uint8_t *) id, strlen(id),
+			      &dom_id) != DOM_NO_ERR) {
+		return NULL;
+	}
+	(void) dom_document_get_element_by_id(thread->htmlc->document,
+					      dom_id, &element);
+	dom_string_unref(dom_id);
+	return (dom_node *) element;
+}
+
+static bool qjs_node_text_has_landing_copy(dom_node *node)
+{
+	dom_string *text = NULL;
+	char buffer[384];
+	if (node == NULL ||
+	    dom_node_get_text_content(node, &text) != DOM_NO_ERR ||
+	    text == NULL) {
+		return false;
+	}
+	qjs_copy_dom_string_cstr(buffer, sizeof(buffer), text);
+	dom_string_unref(text);
+	return strstr(buffer, "Create a new account") != NULL ||
+	       strstr(buffer, "Discover millions") != NULL;
+}
+
+static void qjs_maybe_remember_react_landing_subtree(JSContext *ctx,
+						     dom_node *candidate)
+{
+	jsthread *thread = JS_GetContextOpaque(ctx);
+	const char *name;
+	dom_node *parent = NULL;
+	if (thread == NULL || candidate == NULL ||
+	    qjs_native_node_type(candidate) != DOM_ELEMENT_NODE) {
+		return;
+	}
+	name = thread->active_script_name;
+	if (name == NULL ||
+	    strstr(name, "js.rbxcdn.com/") == NULL ||
+	    strstr(name, "ReactLanding.") == NULL) {
+		return;
+	}
+	if (qjs_native_node_id_equals(candidate, "react-landing-container") ||
+	    dom_node_get_parent_node(candidate, &parent) != DOM_NO_ERR) {
+		return;
+	}
+	if (parent != NULL) {
+		dom_node_unref(parent);
+		return;
+	}
+	if (!qjs_node_text_has_landing_copy(candidate)) {
+		return;
+	}
+	if (thread->active_script_react_landing_candidate != candidate) {
+		if (thread->active_script_react_landing_candidate != NULL) {
+			dom_node_unref(
+				thread->active_script_react_landing_candidate);
+		}
+		thread->active_script_react_landing_candidate =
+			dom_node_ref(candidate);
+#ifdef LEONOS_USER_APP
+		leonos_write("NETSURF QUICKJS DOM REACT CANDIDATE generated subtree\r\n");
+#endif
+	}
+}
+
+static void qjs_attach_react_landing_candidate(JSContext *ctx)
+{
+	jsthread *thread = JS_GetContextOpaque(ctx);
+	dom_node *container = NULL;
+	dom_node *result = NULL;
+	if (thread == NULL ||
+	    thread->active_script_react_landing_attached ||
+	    thread->active_script_react_landing_candidate == NULL) {
+		return;
+	}
+	container = qjs_get_element_by_id_node(ctx, "react-landing-container");
+	if (container == NULL) {
+		return;
+	}
+	if (dom_node_append_child(container,
+				  thread->active_script_react_landing_candidate,
+				  &result) == DOM_NO_ERR) {
+		if (result != NULL) {
+			dom_node_unref(result);
+		}
+		thread->active_script_react_landing_attached = true;
+#ifdef LEONOS_USER_APP
+		leonos_write("NETSURF QUICKJS DOM REACT ATTACH generated subtree\r\n");
+#endif
+		qjs_note_native_node_inserted(
+			ctx, thread->active_script_react_landing_candidate);
+	}
+	dom_node_unref(container);
+}
+
 static bool qjs_dom_append_budget_exceeded(JSContext *ctx)
 {
 	jsthread *thread = JS_GetContextOpaque(ctx);
@@ -2013,28 +2479,42 @@ static JSValue qjs_native_append_child(JSContext *ctx, JSValueConst this_val,
 {
 	struct qjs_native_node *parent = qjs_get_native_node(this_val);
 	struct qjs_native_node *child;
+	dom_node *materialized_child = NULL;
 	dom_node *result = NULL;
 	if (argc < 1) {
 		return JS_UNDEFINED;
 	}
-	if (qjs_dom_append_budget_exceeded(ctx)) {
-		return JS_ThrowInternalError(ctx,
-				"LeonOS ReactLanding DOM append budget");
+	if (!qjs_native_node_id_equals(parent != NULL ? parent->node : NULL,
+				       "react-landing-container") &&
+	    qjs_dom_append_budget_exceeded(ctx)) {
+		return JS_DupValue(ctx, argv[0]);
 	}
-	child = qjs_get_native_node(argv[0]);
+	child = qjs_get_native_or_materialized_node(ctx, argv[0]);
 	qjs_sync_native_subtree_props(ctx, argv[0]);
 	if (parent != NULL && parent->node != NULL &&
-	    child != NULL && child->node != NULL) {
-		if (dom_node_append_child(parent->node, child->node,
+	    child == NULL) {
+		materialized_child = qjs_materialize_js_node(ctx, argv[0]);
+		child = qjs_get_native_or_materialized_node(ctx, argv[0]);
+	}
+	if (parent != NULL && parent->node != NULL) {
+		dom_node *native_child = child != NULL && child->node != NULL ?
+			child->node : materialized_child;
+		if (native_child != NULL &&
+		    dom_node_append_child(parent->node, native_child,
 					  &result) == DOM_NO_ERR) {
 			if (result != NULL) {
 				dom_node_unref(result);
 			}
-#ifdef LEONOS_USER_APP
-			leonos_write("NETSURF QUICKJS DOM appendChild native\r\n");
-#endif
-			qjs_note_native_node_inserted(ctx, child->node);
+			qjs_log_native_dom_mutation(ctx, "appendChild",
+						    parent->node,
+						    native_child);
+			qjs_maybe_remember_react_landing_subtree(ctx,
+								 parent->node);
+			qjs_note_native_node_inserted(ctx, native_child);
 		}
+	}
+	if (materialized_child != NULL) {
+		dom_node_unref(materialized_child);
 	}
 	if (qjs_js_node_is_document_fragment(ctx, argv[0])) {
 		qjs_sync_js_fragment_insert_before(ctx, this_val, argv[0],
@@ -2051,28 +2531,45 @@ static JSValue qjs_native_insert_before(JSContext *ctx, JSValueConst this_val,
 	struct qjs_native_node *parent = qjs_get_native_node(this_val);
 	struct qjs_native_node *child;
 	struct qjs_native_node *ref = NULL;
+	dom_node *materialized_child = NULL;
 	dom_node *result = NULL;
 	if (argc < 1) {
 		return JS_UNDEFINED;
 	}
-	if (qjs_dom_append_budget_exceeded(ctx)) {
-		return JS_ThrowInternalError(ctx,
-				"LeonOS ReactLanding DOM append budget");
+	if (!qjs_native_node_id_equals(parent != NULL ? parent->node : NULL,
+				       "react-landing-container") &&
+	    qjs_dom_append_budget_exceeded(ctx)) {
+		return JS_DupValue(ctx, argv[0]);
 	}
-	child = qjs_get_native_node(argv[0]);
+	child = qjs_get_native_or_materialized_node(ctx, argv[0]);
 	if (argc > 1 && !JS_IsNull(argv[1]) && !JS_IsUndefined(argv[1])) {
-		ref = qjs_get_native_node(argv[1]);
+		ref = qjs_get_native_or_materialized_node(ctx, argv[1]);
 	}
 	qjs_sync_native_subtree_props(ctx, argv[0]);
 	if (parent != NULL && parent->node != NULL &&
-	    child != NULL && child->node != NULL) {
-		if (dom_node_insert_before(parent->node, child->node,
+	    child == NULL) {
+		materialized_child = qjs_materialize_js_node(ctx, argv[0]);
+		child = qjs_get_native_or_materialized_node(ctx, argv[0]);
+	}
+	if (parent != NULL && parent->node != NULL) {
+		dom_node *native_child = child != NULL && child->node != NULL ?
+			child->node : materialized_child;
+		if (native_child != NULL &&
+		    dom_node_insert_before(parent->node, native_child,
 					   ref != NULL ? ref->node : NULL,
 					   &result) == DOM_NO_ERR &&
 		    result != NULL) {
 			dom_node_unref(result);
-			qjs_note_native_node_inserted(ctx, child->node);
+			qjs_log_native_dom_mutation(ctx, "insertBefore",
+						    parent->node,
+						    native_child);
+			qjs_maybe_remember_react_landing_subtree(ctx,
+								 parent->node);
+			qjs_note_native_node_inserted(ctx, native_child);
 		}
+	}
+	if (materialized_child != NULL) {
+		dom_node_unref(materialized_child);
 	}
 	if (qjs_js_node_is_document_fragment(ctx, argv[0])) {
 		qjs_sync_js_fragment_insert_before(ctx, this_val, argv[0],
@@ -2095,7 +2592,7 @@ static JSValue qjs_native_remove_child(JSContext *ctx, JSValueConst this_val,
 	if (argc < 1) {
 		return JS_UNDEFINED;
 	}
-	child = qjs_get_native_node(argv[0]);
+	child = qjs_get_native_or_materialized_node(ctx, argv[0]);
 	if (parent != NULL && parent->node != NULL &&
 	    child != NULL && child->node != NULL &&
 	    dom_node_remove_child(parent->node, child->node,
@@ -2113,26 +2610,46 @@ static JSValue qjs_native_replace_child(JSContext *ctx, JSValueConst this_val,
 	struct qjs_native_node *parent = qjs_get_native_node(this_val);
 	struct qjs_native_node *new_child;
 	struct qjs_native_node *old_child;
+	dom_node *materialized_child = NULL;
 	dom_node *result = NULL;
 	if (argc < 2) {
 		return JS_UNDEFINED;
 	}
-	if (qjs_dom_append_budget_exceeded(ctx)) {
-		return JS_ThrowInternalError(ctx,
-				"LeonOS ReactLanding DOM append budget");
+	if (!qjs_native_node_id_equals(parent != NULL ? parent->node : NULL,
+				       "react-landing-container") &&
+	    qjs_dom_append_budget_exceeded(ctx)) {
+		return JS_DupValue(ctx, argv[1]);
 	}
-	new_child = qjs_get_native_node(argv[0]);
-	old_child = qjs_get_native_node(argv[1]);
+	new_child = qjs_get_native_or_materialized_node(ctx, argv[0]);
+	old_child = qjs_get_native_or_materialized_node(ctx, argv[1]);
 	qjs_sync_native_subtree_props(ctx, argv[0]);
 	if (parent != NULL && parent->node != NULL &&
-	    new_child != NULL && new_child->node != NULL &&
+	    new_child == NULL) {
+		materialized_child = qjs_materialize_js_node(ctx, argv[0]);
+		new_child = qjs_get_native_or_materialized_node(ctx, argv[0]);
+	}
+	if (parent != NULL && parent->node != NULL &&
+	    ((new_child != NULL && new_child->node != NULL) ||
+	     materialized_child != NULL) &&
 	    old_child != NULL && old_child->node != NULL &&
-	    dom_node_replace_child(parent->node, new_child->node,
+	    dom_node_replace_child(parent->node,
+				   new_child != NULL && new_child->node != NULL ?
+					   new_child->node : materialized_child,
 				   old_child->node, &result) == DOM_NO_ERR) {
 		if (result != NULL) {
 			dom_node_unref(result);
 		}
-		qjs_note_native_node_inserted(ctx, new_child->node);
+		qjs_log_native_dom_mutation(ctx, "replaceChild",
+			parent->node,
+			new_child != NULL && new_child->node != NULL ?
+				new_child->node : materialized_child);
+		qjs_maybe_remember_react_landing_subtree(ctx, parent->node);
+		qjs_note_native_node_inserted(ctx,
+			new_child != NULL && new_child->node != NULL ?
+				new_child->node : materialized_child);
+	}
+	if (materialized_child != NULL) {
+		dom_node_unref(materialized_child);
 	}
 	if (qjs_js_node_is_document_fragment(ctx, argv[0])) {
 		qjs_sync_js_fragment_insert_before(ctx, this_val, argv[0],
@@ -4326,6 +4843,10 @@ void js_destroythread(jsthread *thread)
 		return;
 	}
 	heap = thread->heap;
+	if (thread->active_script_react_landing_candidate != NULL) {
+		dom_node_unref(thread->active_script_react_landing_candidate);
+		thread->active_script_react_landing_candidate = NULL;
+	}
 	if (thread->ctx != NULL) {
 		JS_FreeContext(thread->ctx);
 	}
@@ -4437,15 +4958,26 @@ bool js_exec(jsthread *thread, const uint8_t *txt, size_t txtlen,
 	thread->active_script_name = name;
 	thread->active_script_dom_appends = 0u;
 	thread->active_script_dom_budget_hit = false;
+	thread->active_script_react_landing_attached = false;
+	if (thread->active_script_react_landing_candidate != NULL) {
+		dom_node_unref(thread->active_script_react_landing_candidate);
+		thread->active_script_react_landing_candidate = NULL;
+	}
 	result = JS_Eval(thread->ctx, eval_text, eval_len,
 			 name != NULL ? name : "inline-script",
 			 JS_EVAL_TYPE_GLOBAL);
 	uint32_t interrupt_limit = thread->heap != NULL ?
 		thread->heap->interrupt_limit : 0u;
 	bool interrupted = qjs_end_script_interrupt(thread->heap);
+	qjs_attach_react_landing_candidate(thread->ctx);
 	thread->active_script_name = NULL;
 	thread->active_script_dom_appends = 0u;
 	thread->active_script_dom_budget_hit = false;
+	thread->active_script_react_landing_attached = false;
+	if (thread->active_script_react_landing_candidate != NULL) {
+		dom_node_unref(thread->active_script_react_landing_candidate);
+		thread->active_script_react_landing_candidate = NULL;
+	}
 	if (JS_IsException(result)) {
 #ifdef LEONOS_USER_APP
 		if (interrupted) {

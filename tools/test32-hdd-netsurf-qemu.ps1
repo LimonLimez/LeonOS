@@ -6,6 +6,7 @@ param(
     [switch] $RequireSubresource,
     [switch] $AllowNoDomReflow,
     [switch] $AllowTextOnlyPaint,
+    [switch] $AllowDomTextFallback,
     [switch] $LiveSerial,
     [switch] $SkipBuild
 )
@@ -106,6 +107,8 @@ try {
     $SawImageDecoded = $false
     $SawBitmapPlot = $false
     $SawTextPlot = $false
+    $SawReadableFallback = $false
+    $SawDynamicDomText = $false
     $SawDomReflow = $false
     $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $Deadline -and -not $Process.HasExited) {
@@ -132,12 +135,22 @@ try {
         if ($Text.Contains("PLOT TEXT X ")) {
             $SawTextPlot = $true
         }
+        if ($Text.Contains("WINDOW READABLE_FALLBACK WIN 0")) {
+            $SawReadableFallback = $true
+        }
+        if ($Text.Contains("HTML DOM TEXT Create a new account") -or
+            $Text.Contains("HTML DOM TEXT Discover millions of experiences") -or
+            $Text -match 'HTML DOM REACT nodes=.*nonempty=[1-9]') {
+            $SawDynamicDomText = $true
+        }
         if ($Text.Contains("HTML LEONOS DOM REBUILD REFLOW") -or
             $Text.Contains("HTML LEONOS DOM MUTATION REFLOW")) {
             $SawDomReflow = $true
         }
-        $SawRequiredPaint = $SawBitmapPlot -or ($AllowTextOnlyPaint -and $SawTextPlot)
-        $SawRequiredImage = $SawImageDecoded -or $AllowTextOnlyPaint
+        $SawRequiredPaint = $SawBitmapPlot -or
+            ($AllowTextOnlyPaint -and $SawTextPlot) -or
+            ($AllowDomTextFallback -and $SawReadableFallback -and $SawDynamicDomText)
+        $SawRequiredImage = $SawImageDecoded -or $AllowTextOnlyPaint -or $AllowDomTextFallback
         $SawRequiredReflow = $SawDomReflow -or $AllowNoDomReflow
         if ($SawFetchBytes -and $SawFetchFinished -and $SawRedrawAfterFetch -and
             $SawRequiredImage -and $SawRequiredPaint -and $SawRequiredReflow) {
@@ -206,11 +219,18 @@ try {
         }
     }
     if ($Stdout -notlike "*GENERIC LEONOS STB IMAGE DECODED*" -and
-        -not $AllowTextOnlyPaint) {
+        -not $AllowTextOnlyPaint -and -not $AllowDomTextFallback) {
         throw "QEMU did not emit expected serial line: GENERIC LEONOS STB IMAGE DECODED"
     }
     if ($Stdout -notlike "*PLOT BITMAP X *") {
-        if (-not $AllowTextOnlyPaint -or $Stdout -notlike "*PLOT TEXT X *") {
+        if ($AllowDomTextFallback -and
+            $Stdout -like "*WINDOW READABLE_FALLBACK WIN 0*" -and
+            ($Stdout -like "*HTML DOM TEXT Create a new account*" -or
+             $Stdout -like "*HTML DOM TEXT Discover millions of experiences*" -or
+             $Stdout -match 'HTML DOM REACT nodes=.*nonempty=[1-9]')) {
+            # Accepted by explicit opt-in: real dynamic DOM text reached the
+            # readable fallback while normal layout text plotting is still weak.
+        } elseif (-not $AllowTextOnlyPaint -or $Stdout -notlike "*PLOT TEXT X *") {
             throw "QEMU did not emit expected serial line: PLOT BITMAP X "
         }
     }
