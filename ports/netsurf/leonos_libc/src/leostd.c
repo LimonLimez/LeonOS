@@ -138,12 +138,20 @@ static int leonos_stdout_suppress(const char *text)
     }
     if (strncmp(text, "PLOT ", 5) == 0) {
         static unsigned int plot_seen_mask;
+        static unsigned int plot_text_seen;
         unsigned int bit = 0u;
         if (strncmp(text, "PLOT CLIP ", 10) == 0) {
             bit = 1u;
         } else if (strncmp(text, "PLOT RECT ", 10) == 0) {
             bit = 2u;
         } else if (strncmp(text, "PLOT TEXT ", 10) == 0) {
+            if (strstr(text, " LEN 0 STR ") != NULL) {
+                return 1;
+            }
+            if (plot_text_seen < 32u) {
+                plot_text_seen += 1u;
+                return 0;
+            }
             bit = 4u;
         } else if (strncmp(text, "PLOT BITMAP ", 12) == 0) {
             bit = 8u;

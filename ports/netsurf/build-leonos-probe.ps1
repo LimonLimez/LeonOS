@@ -2512,10 +2512,252 @@ static bool leonos_script_async_blocks_later(hlcache_handle *script)
     }
 
     $PlotText = [System.IO.File]::ReadAllText($PlotSource) -replace "`r`n", "`n"
-    if ($PlotText -notmatch 'LEN %u STR') {
-        $OldPlotLine = "`tmoutf(MOUT_PLOT, `"TEXT X %d Y %d STR %.*s`", x, y, (int)length, text);"
-        $NewPlotBlock = @'
-#ifdef WITH_LEONOS_FETCHER
+    if ($PlotText -match 'static void leonos_plot_text\(' -and
+        $PlotText -notmatch 'leonos_plot_utf8_to_ascii') {
+        $OldLeonOsPlotText = @'
+static void leonos_plot_text(int x, int y, const char *text, size_t length,
+			     leonos_u32 colour)
+{
+	char capped[192];
+	size_t out = 0;
+
+	while (out + 1 < sizeof(capped) && out < length) {
+		char ch = text[out];
+		capped[out] = (ch == '\r' || ch == '\n' || ch == '\t') ? ' ' : ch;
+		out++;
+	}
+	capped[out] = 0;
+	if (out == 0) {
+		return;
+	}
+	if (x < leonos_plot_clip_rect.x0 || y < leonos_plot_clip_rect.y0 ||
+	    x >= leonos_plot_clip_rect.x1 || y >= leonos_plot_clip_rect.y1) {
+		return;
+	}
+
+	(void)leonos_fb_text((leonos_u32)(x + LEONOS_NETSURF_VIEW_X),
+			     (leonos_u32)(y + LEONOS_NETSURF_VIEW_Y - 14),
+			     capped,
+			     colour);
+}
+'@
+        $OldLeonOsPlotText = $OldLeonOsPlotText -replace "`r`n", "`n"
+        $NewLeonOsPlotText = @'
+static unsigned int leonos_plot_utf8_next(
+		const char *text, size_t length, size_t *index)
+{
+	unsigned char c;
+
+	if (text == NULL || index == NULL || *index >= length) {
+		return 0u;
+	}
+
+	c = (unsigned char) text[*index];
+	*index += 1u;
+	if (c < 0x80u) {
+		return c;
+	}
+	if ((c & 0xe0u) == 0xc0u && *index < length) {
+		unsigned char c1 = (unsigned char) text[*index];
+		if ((c1 & 0xc0u) == 0x80u) {
+			*index += 1u;
+			return ((unsigned int)(c & 0x1fu) << 6) |
+					(unsigned int)(c1 & 0x3fu);
+		}
+		return '?';
+	}
+	if ((c & 0xf0u) == 0xe0u && *index + 1u < length) {
+		unsigned char c1 = (unsigned char) text[*index];
+		unsigned char c2 = (unsigned char) text[*index + 1u];
+		if ((c1 & 0xc0u) == 0x80u && (c2 & 0xc0u) == 0x80u) {
+			*index += 2u;
+			return ((unsigned int)(c & 0x0fu) << 12) |
+					((unsigned int)(c1 & 0x3fu) << 6) |
+					(unsigned int)(c2 & 0x3fu);
+		}
+		return '?';
+	}
+	if ((c & 0xf8u) == 0xf0u && *index + 2u < length) {
+		unsigned char c1 = (unsigned char) text[*index];
+		unsigned char c2 = (unsigned char) text[*index + 1u];
+		unsigned char c3 = (unsigned char) text[*index + 2u];
+		if ((c1 & 0xc0u) == 0x80u &&
+		    (c2 & 0xc0u) == 0x80u &&
+		    (c3 & 0xc0u) == 0x80u) {
+			*index += 3u;
+			return ((unsigned int)(c & 0x07u) << 18) |
+					((unsigned int)(c1 & 0x3fu) << 12) |
+					((unsigned int)(c2 & 0x3fu) << 6) |
+					(unsigned int)(c3 & 0x3fu);
+		}
+	}
+
+	return '?';
+}
+
+static char leonos_plot_codepoint_ascii(unsigned int cp)
+{
+	if (cp < 0x80u) {
+		return (cp == '\r' || cp == '\n' || cp == '\t') ?
+				' ' : (char) cp;
+	}
+	if ((cp >= 0x0300u && cp <= 0x036fu) ||
+	    (cp >= 0xfe00u && cp <= 0xfe0fu)) {
+		return 0;
+	}
+	if (cp == 0x00a0u || cp == 0x2007u || cp == 0x202fu) return ' ';
+	if (cp == 0x2010u || cp == 0x2011u || cp == 0x2012u ||
+	    cp == 0x2013u || cp == 0x2014u || cp == 0x2212u) return '-';
+	if (cp == 0x2018u || cp == 0x2019u || cp == 0x201au ||
+	    cp == 0x201bu || cp == 0x2032u) return '\'';
+	if (cp == 0x201cu || cp == 0x201du || cp == 0x201eu ||
+	    cp == 0x201fu || cp == 0x2033u) return '"';
+	if (cp == 0x2022u || cp == 0x25cfu || cp == 0x00b7u) return '*';
+	if (cp == 0x2026u) return '.';
+	if (cp == 0x00a9u) return 'c';
+	if (cp == 0x00aeu) return 'r';
+	if (cp == 0x2122u) return 'T';
+
+	switch (cp) {
+	case 0x00c0u: case 0x00c1u: case 0x00c2u: case 0x00c3u:
+	case 0x00c4u: case 0x00c5u: case 0x0100u: case 0x0102u:
+	case 0x0104u: return 'A';
+	case 0x00e0u: case 0x00e1u: case 0x00e2u: case 0x00e3u:
+	case 0x00e4u: case 0x00e5u: case 0x0101u: case 0x0103u:
+	case 0x0105u: return 'a';
+	case 0x00c6u: return 'A';
+	case 0x00e6u: return 'a';
+	case 0x00c7u: case 0x0106u: case 0x0108u: case 0x010au:
+	case 0x010cu: return 'C';
+	case 0x00e7u: case 0x0107u: case 0x0109u: case 0x010bu:
+	case 0x010du: return 'c';
+	case 0x00d0u: case 0x010eu: case 0x0110u: return 'D';
+	case 0x00f0u: case 0x010fu: case 0x0111u: return 'd';
+	case 0x00c8u: case 0x00c9u: case 0x00cau: case 0x00cbu:
+	case 0x0112u: case 0x0114u: case 0x0116u: case 0x0118u:
+	case 0x011au: return 'E';
+	case 0x00e8u: case 0x00e9u: case 0x00eau: case 0x00ebu:
+	case 0x0113u: case 0x0115u: case 0x0117u: case 0x0119u:
+	case 0x011bu: return 'e';
+	case 0x011cu: case 0x011eu: case 0x0120u: case 0x0122u:
+		return 'G';
+	case 0x011du: case 0x011fu: case 0x0121u: case 0x0123u:
+		return 'g';
+	case 0x0124u: case 0x0126u: return 'H';
+	case 0x0125u: case 0x0127u: return 'h';
+	case 0x00ccu: case 0x00cdu: case 0x00ceu: case 0x00cfu:
+	case 0x0128u: case 0x012au: case 0x012cu: case 0x012eu:
+	case 0x0130u: return 'I';
+	case 0x00ecu: case 0x00edu: case 0x00eeu: case 0x00efu:
+	case 0x0129u: case 0x012bu: case 0x012du: case 0x012fu:
+	case 0x0131u: return 'i';
+	case 0x0134u: return 'J';
+	case 0x0135u: return 'j';
+	case 0x0136u: return 'K';
+	case 0x0137u: return 'k';
+	case 0x0139u: case 0x013bu: case 0x013du: case 0x013fu:
+	case 0x0141u: return 'L';
+	case 0x013au: case 0x013cu: case 0x013eu: case 0x0140u:
+	case 0x0142u: return 'l';
+	case 0x00d1u: case 0x0143u: case 0x0145u: case 0x0147u:
+		return 'N';
+	case 0x00f1u: case 0x0144u: case 0x0146u: case 0x0148u:
+		return 'n';
+	case 0x00d2u: case 0x00d3u: case 0x00d4u: case 0x00d5u:
+	case 0x00d6u: case 0x00d8u: case 0x014cu: case 0x014eu:
+	case 0x0150u: return 'O';
+	case 0x00f2u: case 0x00f3u: case 0x00f4u: case 0x00f5u:
+	case 0x00f6u: case 0x00f8u: case 0x014du: case 0x014fu:
+	case 0x0151u: return 'o';
+	case 0x0152u: return 'O';
+	case 0x0153u: return 'o';
+	case 0x0154u: case 0x0156u: case 0x0158u: return 'R';
+	case 0x0155u: case 0x0157u: case 0x0159u: return 'r';
+	case 0x015au: case 0x015cu: case 0x015eu: case 0x0160u:
+		return 'S';
+	case 0x00dfu: case 0x015bu: case 0x015du: case 0x015fu:
+	case 0x0161u: return 's';
+	case 0x0162u: case 0x0164u: case 0x0166u: return 'T';
+	case 0x0163u: case 0x0165u: case 0x0167u: return 't';
+	case 0x00d9u: case 0x00dau: case 0x00dbu: case 0x00dcu:
+	case 0x0168u: case 0x016au: case 0x016cu: case 0x016eu:
+	case 0x0170u: case 0x0172u: return 'U';
+	case 0x00f9u: case 0x00fau: case 0x00fbu: case 0x00fcu:
+	case 0x0169u: case 0x016bu: case 0x016du: case 0x016fu:
+	case 0x0171u: case 0x0173u: return 'u';
+	case 0x0174u: return 'W';
+	case 0x0175u: return 'w';
+	case 0x00ddu: case 0x0176u: case 0x0178u: return 'Y';
+	case 0x00fdu: case 0x00ffu: case 0x0177u: return 'y';
+	case 0x0179u: case 0x017bu: case 0x017du: return 'Z';
+	case 0x017au: case 0x017cu: case 0x017eu: return 'z';
+	default: break;
+	}
+
+	if (cp >= 0x0410u && cp <= 0x042fu) {
+		static const char upper[] = "ABVGDEZZIIKLMNOPRSTUFHCCSSYEEUA";
+		return upper[cp - 0x0410u];
+	}
+	if (cp >= 0x0430u && cp <= 0x044fu) {
+		static const char lower[] = "abvgdezziiklmnoprstufhccssyeeua";
+		return lower[cp - 0x0430u];
+	}
+	if (cp == 0x0401u) return 'E';
+	if (cp == 0x0451u) return 'e';
+
+	return '?';
+}
+
+static void leonos_plot_utf8_to_ascii(
+		char *dst, size_t dst_len,
+		const char *text, size_t length)
+{
+	size_t in = 0;
+	size_t out = 0;
+
+	if (dst_len == 0) {
+		return;
+	}
+	while (out + 1u < dst_len && in < length && text[in] != 0) {
+		unsigned int cp = leonos_plot_utf8_next(text, length, &in);
+		char ch = leonos_plot_codepoint_ascii(cp);
+		if (ch != 0) {
+			dst[out++] = ch;
+		}
+	}
+	dst[out] = 0;
+}
+
+static void leonos_plot_text(int x, int y, const char *text, size_t length,
+			     leonos_u32 colour)
+{
+	char capped[192];
+
+	leonos_plot_utf8_to_ascii(capped, sizeof(capped), text, length);
+	if (capped[0] == 0) {
+		return;
+	}
+	if (x < leonos_plot_clip_rect.x0 || y < leonos_plot_clip_rect.y0 ||
+	    x >= leonos_plot_clip_rect.x1 || y >= leonos_plot_clip_rect.y1) {
+		return;
+	}
+
+	(void)leonos_fb_text((leonos_u32)(x + LEONOS_NETSURF_VIEW_X),
+			     (leonos_u32)(y + LEONOS_NETSURF_VIEW_Y - 14),
+			     capped,
+			     colour);
+}
+'@
+        $NewLeonOsPlotText = $NewLeonOsPlotText -replace "`r`n", "`n"
+        if (-not $PlotText.Contains($OldLeonOsPlotText)) {
+            throw "Could not patch NetSurf LeonOS UTF-8 plot text fallback."
+        }
+        $PlotText = $PlotText.Replace($OldLeonOsPlotText, $NewLeonOsPlotText)
+        [System.IO.File]::WriteAllText($PlotSource, $PlotText, [System.Text.Encoding]::ASCII)
+    }
+    $PlotText = [System.IO.File]::ReadAllText($PlotSource) -replace "`r`n", "`n"
+    if ($PlotText -notmatch 'leonos_plot_utf8_to_ascii\(preview') {
+        $OldPlotPreview = @'
 	size_t capped = length;
 	char preview[49];
 	size_t i;
@@ -2528,6 +2770,30 @@ static bool leonos_script_async_blocks_later(hlcache_handle *script)
 		preview[i] = (ch == '\r' || ch == '\n' || ch == '\t') ? ' ' : ch;
 	}
 	preview[capped] = 0;
+	moutf(MOUT_PLOT, "TEXT X %d Y %d LEN %u STR %s", x, y,
+	      (unsigned int)length, preview);
+'@
+        $OldPlotPreview = $OldPlotPreview -replace "`r`n", "`n"
+        $NewPlotPreview = @'
+	char preview[49];
+
+	leonos_plot_utf8_to_ascii(preview, sizeof(preview), text, length);
+	moutf(MOUT_PLOT, "TEXT X %d Y %d LEN %u STR %s", x, y,
+	      (unsigned int)length, preview);
+'@
+        $NewPlotPreview = $NewPlotPreview -replace "`r`n", "`n"
+        if ($PlotText.Contains($OldPlotPreview)) {
+            $PlotText = $PlotText.Replace($OldPlotPreview, $NewPlotPreview)
+            [System.IO.File]::WriteAllText($PlotSource, $PlotText, [System.Text.Encoding]::ASCII)
+        }
+    }
+    if ($PlotText -notmatch 'LEN %u STR') {
+        $OldPlotLine = "`tmoutf(MOUT_PLOT, `"TEXT X %d Y %d STR %.*s`", x, y, (int)length, text);"
+        $NewPlotBlock = @'
+#ifdef WITH_LEONOS_FETCHER
+	char preview[49];
+
+	leonos_plot_utf8_to_ascii(preview, sizeof(preview), text, length);
 	moutf(MOUT_PLOT, "TEXT X %d Y %d LEN %u STR %s", x, y,
 	      (unsigned int)length, preview);
 #else
