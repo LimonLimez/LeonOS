@@ -886,6 +886,7 @@ function Ensure-NetSurfLeonOsSourcePatches {
     $CssSource = Join-Path $NetSurfRoot "content\handlers\css\css.c"
     $HtmlCssSource = Join-Path $NetSurfRoot "content\handlers\html\css.c"
     $HtmlSource = Join-Path $NetSurfRoot "content\handlers\html\html.c"
+    $LayoutSource = Join-Path $NetSurfRoot "content\handlers\html\layout.c"
     $BoxTextareaSource = Join-Path $NetSurfRoot "content\handlers\html\box_textarea.c"
     $FormSource = Join-Path $NetSurfRoot "content\handlers\html\form.c"
     $FormsSource = Join-Path $NetSurfRoot "content\handlers\html\forms.c"
@@ -907,6 +908,9 @@ function Ensure-NetSurfLeonOsSourcePatches {
     }
     if (-not (Test-Path -LiteralPath $HtmlSource)) {
         throw "NetSurf HTML source missing at $HtmlSource."
+    }
+    if (-not (Test-Path -LiteralPath $LayoutSource)) {
+        throw "NetSurf HTML layout source missing at $LayoutSource."
     }
     if (-not (Test-Path -LiteralPath $BoxTextareaSource)) {
         throw "NetSurf HTML textarea source missing at $BoxTextareaSource."
@@ -1720,7 +1724,382 @@ struct leonos_css_var {
         [System.IO.File]::WriteAllText($ObjectSource, $ObjectText, [System.Text.Encoding]::ASCII)
     }
 
+    $LayoutText = [System.IO.File]::ReadAllText($LayoutSource) -replace "`r`n", "`n"
+    if ($LayoutText -notmatch 'leonos_layout_repair_zero_text_heights') {
+        $OldLineHeightEnd = @'
+	return FIXTOINT(line_height);
+}
+
+'@
+        $OldLineHeightEnd = $OldLineHeightEnd -replace "`r`n", "`n"
+        $NewLineHeightEnd = @'
+	return FIXTOINT(line_height);
+}
+
+#ifdef LEONOS_USER_APP
+static int leonos_text_fallback_line_height(
+		const css_unit_ctx *unit_len_ctx,
+		const css_computed_style *style)
+{
+	css_fixed font_size = 0;
+	css_unit font_unit = CSS_UNIT_PX;
+	int height = 0;
+
+	if (style != NULL &&
+	    css_computed_font_size(style, &font_size, &font_unit) ==
+				CSS_FONT_SIZE_DIMENSION) {
+		css_fixed font_px = css_unit_len2device_px(style, unit_len_ctx,
+				font_size, font_unit);
+		height = FIXTOINT(font_px * 13 / 10);
+	}
+
+	if (height <= 0) {
+		height = 16;
+	}
+
+	return height;
+}
+
+static bool leonos_text_box_has_nonempty_text(const struct box *box)
+{
+	size_t i;
+
+	if (box == NULL || box->text == NULL || box->length == 0) {
+		return false;
+	}
+
+	for (i = 0u; i < box->length; i++) {
+		char ch = box->text[i];
+		if (ch != ' ' && ch != '\r' && ch != '\n' && ch != '\t') {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static bool leonos_layout_repair_zero_text_heights(
+		html_content *content,
+		struct box *box,
+		int *bottom_out)
+{
+	struct box *child;
+	bool has_text = false;
+	int child_bottom = 0;
+
+	if (box == NULL) {
+		if (bottom_out != NULL) {
+			*bottom_out = 0;
+		}
+		return false;
+	}
+
+	for (child = box->children; child != NULL; child = child->next) {
+		int descendant_bottom = 0;
+		if (leonos_layout_repair_zero_text_heights(content, child,
+				&descendant_bottom)) {
+			int bottom = child->y + descendant_bottom;
+			if (child_bottom < bottom) {
+				child_bottom = bottom;
+			}
+			has_text = true;
+		}
+	}
+
+	if (box->type == BOX_TEXT && leonos_text_box_has_nonempty_text(box)) {
+		if (box->height <= 0) {
+			box->height = leonos_text_fallback_line_height(
+					&content->unit_len_ctx,
+					box->style);
+		}
+		has_text = true;
+		child_bottom = box->height;
+	}
+
+	if (has_text && box->type != BOX_TEXT &&
+	    box->height == 0 && child_bottom > 0 &&
+	    lh__box_is_object(box) == false) {
+		box->height = child_bottom;
+	}
+
+	if (bottom_out != NULL) {
+		int own_bottom = box->padding[TOP] +
+				(box->height > 0 ? box->height : 0) +
+				box->padding[BOTTOM] +
+				box->border[BOTTOM].width +
+				box->margin[BOTTOM];
+		*bottom_out = own_bottom > child_bottom ?
+				own_bottom : child_bottom;
+	}
+
+	return has_text;
+}
+#endif
+
+'@
+        $NewLineHeightEnd = $NewLineHeightEnd -replace "`r`n", "`n"
+        if (-not $LayoutText.Contains($OldLineHeightEnd)) {
+            throw "Could not patch NetSurf LeonOS layout text repair helpers."
+        }
+        $LayoutText = $LayoutText.Replace($OldLineHeightEnd, $NewLineHeightEnd)
+
+        $OldInlineHeight = @'
+			b->height = line_height(&content->unit_len_ctx,
+					b->style ? b->style :
+					b->parent->parent->style);
+			if (height < b->height)
+				height = b->height;
+'@
+        $OldInlineHeight = $OldInlineHeight -replace "`r`n", "`n"
+        $NewInlineHeight = @'
+			b->height = line_height(&content->unit_len_ctx,
+					b->style ? b->style :
+					b->parent->parent->style);
+#ifdef LEONOS_USER_APP
+			if (b->type == BOX_TEXT &&
+			    b->text != NULL && b->length > 0 &&
+			    b->height <= 0) {
+				b->height = leonos_text_fallback_line_height(
+						&content->unit_len_ctx,
+						b->style ? b->style :
+						b->parent->parent->style);
+			}
+#endif
+			if (height < b->height)
+				height = b->height;
+'@
+        $NewInlineHeight = $NewInlineHeight -replace "`r`n", "`n"
+        if (-not $LayoutText.Contains($OldInlineHeight)) {
+            throw "Could not patch NetSurf LeonOS inline text fallback height."
+        }
+        $LayoutText = $LayoutText.Replace($OldInlineHeight, $NewInlineHeight)
+
+        $OldLayoutDone = @'
+	layout_lists(content, doc);
+	layout_position_absolute(doc, doc, 0, 0, content);
+	layout_position_relative(&content->unit_len_ctx, doc, doc, 0, 0);
+
+	layout_calculate_descendant_bboxes(&content->unit_len_ctx, doc);
+'@
+        $OldLayoutDone = $OldLayoutDone -replace "`r`n", "`n"
+        $NewLayoutDone = @'
+	layout_lists(content, doc);
+	layout_position_absolute(doc, doc, 0, 0, content);
+	layout_position_relative(&content->unit_len_ctx, doc, doc, 0, 0);
+
+#ifdef LEONOS_USER_APP
+	{
+		int ignored_bottom = 0;
+		leonos_layout_repair_zero_text_heights(content, doc,
+				&ignored_bottom);
+	}
+#endif
+
+	layout_calculate_descendant_bboxes(&content->unit_len_ctx, doc);
+'@
+        $NewLayoutDone = $NewLayoutDone -replace "`r`n", "`n"
+        if (-not $LayoutText.Contains($OldLayoutDone)) {
+            throw "Could not patch NetSurf LeonOS layout text repair pass."
+        }
+        $LayoutText = $LayoutText.Replace($OldLayoutDone, $NewLayoutDone)
+        [System.IO.File]::WriteAllText($LayoutSource, $LayoutText, [System.Text.Encoding]::ASCII)
+    }
+
     $RedrawText = [System.IO.File]::ReadAllText($RedrawSource) -replace "`r`n", "`n"
+    $RedrawChanged = $false
+    if ($RedrawText -notmatch 'leonos_redraw_layout_text_overlay') {
+        $OldRedrawInclude = @'
+#include "html/layout.h"
+
+'@
+        $OldRedrawInclude = $OldRedrawInclude -replace "`r`n", "`n"
+        $NewRedrawInclude = @'
+#include "html/layout.h"
+
+#ifdef LEONOS_USER_APP
+#include "leonos_user.h"
+static unsigned int leonos_redraw_text_diag_count;
+
+static void leonos_redraw_log_text_box(struct box *box, int x, int y,
+		const plot_font_style_t *fstyle)
+{
+	char msg[360];
+	size_t n;
+	size_t copy;
+
+	if (box == NULL || box->text == NULL ||
+	    box->length == 0 || leonos_redraw_text_diag_count >= 80u) {
+		return;
+	}
+
+	copy = box->length;
+	if (copy > 120u) {
+		copy = 120u;
+	}
+	for (n = 0; n < copy; n++) {
+		char ch = box->text[n];
+		if (ch == '\r' || ch == '\n' || ch == '\t') {
+			ch = ' ';
+		}
+		msg[n] = ch;
+	}
+	msg[copy] = 0;
+
+	snprintf(msg + copy, sizeof(msg) - copy,
+		 " | x=%d y=%d w=%d h=%d colour=%06x\r\n",
+		 x, y, box->width, box->height,
+		 (unsigned int)(fstyle != NULL ? fstyle->foreground : 0u));
+	leonos_write("HTML REDRAW TEXT ");
+	leonos_write(msg);
+	leonos_redraw_text_diag_count++;
+}
+
+static bool leonos_redraw_text_nonempty(const struct box *box)
+{
+	size_t i;
+
+	if (box == NULL || box->text == NULL || box->length == 0) {
+		return false;
+	}
+
+	for (i = 0u; i < box->length; i++) {
+		char ch = box->text[i];
+		if (ch != ' ' && ch != '\r' && ch != '\n' && ch != '\t') {
+			return true;
+		}
+	}
+
+	return false;
+}
+#endif
+
+'@
+        $NewRedrawInclude = $NewRedrawInclude -replace "`r`n", "`n"
+        if (-not $RedrawText.Contains($OldRedrawInclude)) {
+            throw "Could not patch NetSurf LeonOS redraw text helpers."
+        }
+        $RedrawText = $RedrawText.Replace($OldRedrawInclude, $NewRedrawInclude)
+
+        $OldTextBoxDraw = @'
+	font_plot_style_from_css(&html->unit_len_ctx, box->style, &fstyle);
+	fstyle.background = current_background_color;
+
+	if (!text_redraw(box->text,
+'@
+        $OldTextBoxDraw = $OldTextBoxDraw -replace "`r`n", "`n"
+        $NewTextBoxDraw = @'
+	font_plot_style_from_css(&html->unit_len_ctx, box->style, &fstyle);
+	fstyle.background = current_background_color;
+
+#ifdef LEONOS_USER_APP
+	leonos_redraw_log_text_box(box, x, y, &fstyle);
+#endif
+
+	if (!text_redraw(box->text,
+'@
+        $NewTextBoxDraw = $NewTextBoxDraw -replace "`r`n", "`n"
+        if (-not $RedrawText.Contains($OldTextBoxDraw)) {
+            throw "Could not patch NetSurf LeonOS redraw text logging."
+        }
+        $RedrawText = $RedrawText.Replace($OldTextBoxDraw, $NewTextBoxDraw)
+
+        $OldTextBoxEnd = @'
+	return true;
+}
+
+bool html_redraw_box(const html_content *html, struct box *box,
+'@
+        $OldTextBoxEnd = $OldTextBoxEnd -replace "`r`n", "`n"
+        $NewTextBoxEnd = @'
+	return true;
+}
+
+#ifdef LEONOS_USER_APP
+static bool leonos_redraw_layout_text_overlay(const html_content *html,
+		struct box *box, int x_parent, int y_parent,
+		const struct rect *clip, float scale,
+		colour current_background_color,
+		const struct redraw_context *ctx)
+{
+	struct box *child;
+	int x;
+	int y;
+
+	if (box == NULL) {
+		return true;
+	}
+
+	x = x_parent + box->x;
+	y = y_parent + box->y;
+
+	if (box->type == BOX_TEXT &&
+	    leonos_redraw_text_nonempty(box) &&
+	    box->width > 0 && box->height > 0) {
+		if (!html_redraw_text_box(html, box, x, y, clip, scale,
+				current_background_color, ctx)) {
+			return false;
+		}
+	}
+
+	for (child = box->children; child != NULL; child = child->next) {
+		if (child->type == BOX_FLOAT_LEFT ||
+		    child->type == BOX_FLOAT_RIGHT) {
+			continue;
+		}
+		if (!leonos_redraw_layout_text_overlay(html, child,
+				x - scrollbar_get_offset(box->scroll_x),
+				y - scrollbar_get_offset(box->scroll_y),
+				clip, scale, current_background_color, ctx)) {
+			return false;
+		}
+	}
+
+	for (child = box->float_children; child != NULL;
+	     child = child->next_float) {
+		if (!leonos_redraw_layout_text_overlay(html, child,
+				x - scrollbar_get_offset(box->scroll_x),
+				y - scrollbar_get_offset(box->scroll_y),
+				clip, scale, current_background_color, ctx)) {
+			return false;
+		}
+	}
+
+	return true;
+}
+#endif
+
+bool html_redraw_box(const html_content *html, struct box *box,
+'@
+        $NewTextBoxEnd = $NewTextBoxEnd -replace "`r`n", "`n"
+        if (-not $RedrawText.Contains($OldTextBoxEnd)) {
+            throw "Could not patch NetSurf LeonOS redraw text overlay."
+        }
+        $RedrawText = $RedrawText.Replace($OldTextBoxEnd, $NewTextBoxEnd)
+
+        $OldRedrawCall = @'
+		result &= html_redraw_box(html, box, data->x, data->y, clip,
+				data->scale, pstyle_fill_bg.fill_colour, ctx);
+'@
+        $OldRedrawCall = $OldRedrawCall -replace "`r`n", "`n"
+        $NewRedrawCall = @'
+		result &= html_redraw_box(html, box, data->x, data->y, clip,
+				data->scale, pstyle_fill_bg.fill_colour, ctx);
+#ifdef LEONOS_USER_APP
+		if (result && leonos_redraw_text_diag_count == 0u) {
+			leonos_write("HTML REDRAW TEXT OVERLAY START\r\n");
+			result &= leonos_redraw_layout_text_overlay(html, box,
+					data->x, data->y, clip, data->scale,
+					pstyle_fill_bg.fill_colour, ctx);
+		}
+#endif
+'@
+        $NewRedrawCall = $NewRedrawCall -replace "`r`n", "`n"
+        if (-not $RedrawText.Contains($OldRedrawCall)) {
+            throw "Could not patch NetSurf LeonOS redraw text overlay call."
+        }
+        $RedrawText = $RedrawText.Replace($OldRedrawCall, $NewRedrawCall)
+        $RedrawChanged = $true
+    }
     if ($RedrawText -notmatch 'HTML REDRAW DEFER NO LAYOUT') {
         $OldRedrawGuard = @'
 	box = html->layout;
@@ -1731,6 +2110,11 @@ struct leonos_css_var {
 #endif
 '@
         $OldRedrawGuard = $OldRedrawGuard -replace "`r`n", "`n"
+        $OldRedrawGuardPlain = @'
+	box = html->layout;
+	assert(box);
+'@
+        $OldRedrawGuardPlain = $OldRedrawGuardPlain -replace "`r`n", "`n"
         $NewRedrawGuard = @'
 	box = html->layout;
 #ifdef LEONOS_USER_APP
@@ -1746,10 +2130,17 @@ struct leonos_css_var {
 #endif
 '@
         $NewRedrawGuard = $NewRedrawGuard -replace "`r`n", "`n"
-        if (-not $RedrawText.Contains($OldRedrawGuard)) {
+        if ($RedrawText.Contains($OldRedrawGuard)) {
+            $RedrawText = $RedrawText.Replace($OldRedrawGuard, $NewRedrawGuard)
+            $RedrawChanged = $true
+        } elseif ($RedrawText.Contains($OldRedrawGuardPlain)) {
+            $RedrawText = $RedrawText.Replace($OldRedrawGuardPlain, $NewRedrawGuard)
+            $RedrawChanged = $true
+        } else {
             throw "Could not patch NetSurf LeonOS redraw conversion guard."
         }
-        $RedrawText = $RedrawText.Replace($OldRedrawGuard, $NewRedrawGuard)
+    }
+    if ($RedrawChanged) {
         [System.IO.File]::WriteAllText($RedrawSource, $RedrawText, [System.Text.Encoding]::ASCII)
     }
 
