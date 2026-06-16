@@ -19,6 +19,9 @@
 #include "leonos_user.h"
 #endif
 
+#define LEONOS_QUICKJS_FETCH_MAX (512u * 1024u)
+#define LEONOS_QUICKJS_JOB_LIMIT 128u
+
 struct jsheap {
 	JSRuntime *runtime;
 	int timeout;
@@ -37,6 +40,7 @@ struct jsthread {
 	const char *active_script_name;
 	unsigned int active_script_dom_appends;
 	bool active_script_dom_budget_hit;
+	bool active_script_dom_native_budget_hit;
 	bool active_script_react_landing_attached;
 	dom_node *active_script_react_landing_candidate;
 	bool closed;
@@ -53,6 +57,26 @@ static JSValue qjs_new_dom_element(JSContext *ctx, dom_element *element);
 static JSValue qjs_new_dom_node_limited(JSContext *ctx, dom_node *node,
 				       unsigned int ancestor_depth,
 				       bool populate_children);
+static JSValue qjs_document_query_selector_all(JSContext *ctx,
+					       JSValueConst this_val,
+					       int argc,
+					       JSValueConst *argv);
+static JSValue qjs_document_query_selector(JSContext *ctx,
+					   JSValueConst this_val,
+					   int argc,
+					   JSValueConst *argv);
+static JSValue qjs_document_get_elements_by_tag_name(JSContext *ctx,
+						     JSValueConst this_val,
+						     int argc,
+						     JSValueConst *argv);
+static JSValue qjs_document_get_elements_by_class_name(JSContext *ctx,
+						       JSValueConst this_val,
+						       int argc,
+						       JSValueConst *argv);
+static JSValue qjs_document_get_elements_by_name(JSContext *ctx,
+						 JSValueConst this_val,
+						 int argc,
+						 JSValueConst *argv);
 static uint32_t qjs_array_length(JSContext *ctx, JSValueConst array);
 static void qjs_sync_native_subtree_props(JSContext *ctx, JSValueConst obj);
 
@@ -87,8 +111,14 @@ static uint32_t qjs_script_interrupt_limit(const jsheap *heap, size_t bytes,
 		limit = timeout * 100u;
 	}
 	if (name != NULL &&
-	    strstr(name, "SearchLandingPage.") != NULL &&
 	    strstr(name, "js.rbxcdn.com/") != NULL &&
+	    (strstr(name, "SearchLandingPage.") != NULL ||
+	     strstr(name, "AngularJsUtilities.") != NULL ||
+	     strstr(name, "CoreUtilities.") != NULL ||
+	     strstr(name, "Thumbnails.") != NULL ||
+	     strstr(name, "GameCarousel.") != NULL ||
+	     strstr(name, "ReactStyleGuide.") != NULL ||
+	     strstr(name, "63b59480fef503ff6648900d1051bae7531757a38ce24f77587552fca279d16c") != NULL) &&
 	    limit < timeout * 5000u) {
 		limit = timeout * 5000u;
 	}
@@ -150,13 +180,7 @@ static bool qjs_should_skip_blocking_script(const char *name,
 	     strstr(name, "UserProfiles.js") != NULL ||
 	     strstr(name, "Navigation.js") != NULL ||
 	     strstr(name, "Sentry.js") != NULL ||
-	     strstr(name, "SearchLandingPage.js") != NULL ||
-	     strstr(name, "AngularJsUtilities.js") != NULL ||
 	     strstr(name, "3756ad214dde52cb58a1300177547475") != NULL ||
-	     strstr(name, "63b59480fef503ff6648900d1051bae7531757a38ce24f77587552fca279d16c") != NULL ||
-	     strstr(name, "CoreUtilities.js") != NULL ||
-	     strstr(name, "ReactStyleGuide.js") != NULL ||
-	     strstr(name, "Thumbnails.js") != NULL ||
 	     strstr(name, "PresenceStatus.js") != NULL ||
 	     strstr(name, "RealTime.js") != NULL ||
 	     strstr(name, "AccountSwitcher.js") != NULL ||
@@ -181,13 +205,6 @@ static bool qjs_should_skip_blocking_script(const char *name,
 	return qjs_mem_contains(source, bytes, "bundleDetected(\"UserProfiles\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"Navigation\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"Sentry\")") ||
-	       qjs_mem_contains(source, bytes, "bundleDetected(\"SearchLandingPage\")") ||
-	       qjs_mem_contains(source, bytes, "bundleDetected('angular')") ||
-	       qjs_mem_contains(source, bytes, "bundleDetected(\"AngularJsUtilities\")") ||
-	       qjs_mem_contains(source, bytes, "bundleDetected(\"WebBlox\")") ||
-	       qjs_mem_contains(source, bytes, "bundleDetected(\"CoreUtilities\")") ||
-	       qjs_mem_contains(source, bytes, "bundleDetected(\"ReactStyleGuide\")") ||
-	       qjs_mem_contains(source, bytes, "bundleDetected(\"Thumbnails\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"PresenceStatus\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"RealTime\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"AccountSwitcher\")") ||
@@ -261,6 +278,187 @@ static JSValue qjs_console_log(JSContext *ctx, JSValueConst this_val,
 		}
 	}
 	return JS_UNDEFINED;
+}
+
+static JSValue qjs_leonos_fetch_text(JSContext *ctx, JSValueConst this_val,
+				     int argc, JSValueConst *argv)
+{
+	JSValue response;
+	const char *url;
+	const char *method = NULL;
+	const char *request_body = NULL;
+	const char *content_type = NULL;
+	const char *accept = NULL;
+	size_t request_body_len = 0u;
+	bool ok = false;
+	(void) this_val;
+
+	response = JS_NewObject(ctx);
+	JS_SetPropertyStr(ctx, response, "ok", JS_NewBool(ctx, false));
+	JS_SetPropertyStr(ctx, response, "status", JS_NewInt32(ctx, 0));
+	JS_SetPropertyStr(ctx, response, "contentType", JS_NewString(ctx, ""));
+	JS_SetPropertyStr(ctx, response, "body", JS_NewString(ctx, ""));
+	if (argc < 1) {
+		return response;
+	}
+
+	url = JS_ToCString(ctx, argv[0]);
+	if (url == NULL) {
+		return response;
+	}
+	if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1])) {
+		method = JS_ToCString(ctx, argv[1]);
+		if (method == NULL) {
+			JS_FreeCString(ctx, url);
+			return response;
+		}
+	}
+	if (argc >= 3 && !JS_IsUndefined(argv[2]) && !JS_IsNull(argv[2])) {
+		request_body = JS_ToCStringLen(ctx, &request_body_len, argv[2]);
+		if (request_body == NULL) {
+			if (method != NULL) {
+				JS_FreeCString(ctx, method);
+			}
+			JS_FreeCString(ctx, url);
+			return response;
+		}
+	}
+	if (argc >= 4 && !JS_IsUndefined(argv[3]) && !JS_IsNull(argv[3])) {
+		content_type = JS_ToCString(ctx, argv[3]);
+		if (content_type == NULL) {
+			if (request_body != NULL) {
+				JS_FreeCString(ctx, request_body);
+			}
+			if (method != NULL) {
+				JS_FreeCString(ctx, method);
+			}
+			JS_FreeCString(ctx, url);
+			return response;
+		}
+	}
+	if (argc >= 5 && !JS_IsUndefined(argv[4]) && !JS_IsNull(argv[4])) {
+		accept = JS_ToCString(ctx, argv[4]);
+		if (accept == NULL) {
+			if (content_type != NULL) {
+				JS_FreeCString(ctx, content_type);
+			}
+			if (request_body != NULL) {
+				JS_FreeCString(ctx, request_body);
+			}
+			if (method != NULL) {
+				JS_FreeCString(ctx, method);
+			}
+			JS_FreeCString(ctx, url);
+			return response;
+		}
+	}
+	JS_SetPropertyStr(ctx, response, "url", JS_NewString(ctx, url));
+#ifdef LEONOS_USER_APP
+	if (strncmp(url, "https://", 8) != 0) {
+		leonos_write("NETSURF QUICKJS FETCH blocked non-https\r\n");
+		if (accept != NULL) {
+			JS_FreeCString(ctx, accept);
+		}
+		if (content_type != NULL) {
+			JS_FreeCString(ctx, content_type);
+		}
+		if (request_body != NULL) {
+			JS_FreeCString(ctx, request_body);
+		}
+		if (method != NULL) {
+			JS_FreeCString(ctx, method);
+		}
+		JS_FreeCString(ctx, url);
+		return response;
+	}
+	char *body = malloc(LEONOS_QUICKJS_FETCH_MAX + 1u);
+	struct leonos_net_fetch_meta meta;
+	struct leonos_net_fetch_request request;
+	uint32_t got;
+	if (body == NULL) {
+		leonos_write("NETSURF QUICKJS FETCH oom\r\n");
+		if (accept != NULL) {
+			JS_FreeCString(ctx, accept);
+		}
+		if (content_type != NULL) {
+			JS_FreeCString(ctx, content_type);
+		}
+		if (request_body != NULL) {
+			JS_FreeCString(ctx, request_body);
+		}
+		if (method != NULL) {
+			JS_FreeCString(ctx, method);
+		}
+		JS_FreeCString(ctx, url);
+		return response;
+	}
+	leonos_write("NETSURF QUICKJS FETCH begin ");
+	leonos_write(url);
+	leonos_write(" method ");
+	leonos_write(method != NULL ? method : "GET");
+	if (request_body_len != 0u) {
+		char detail[64];
+		int detail_len = snprintf(detail, sizeof(detail),
+			" body=%u", (unsigned int) request_body_len);
+		if (detail_len > 0) {
+			leonos_write(detail);
+		}
+	}
+	leonos_write("\r\n");
+	memset(&request, 0, sizeof(request));
+	request.url = url;
+	request.buffer = body;
+	request.max_len = LEONOS_QUICKJS_FETCH_MAX;
+	request.method = method != NULL ? method : "GET";
+	request.body = request_body;
+	request.body_len = request_body_len > UINT32_MAX ?
+		UINT32_MAX : (uint32_t) request_body_len;
+	request.content_type = content_type != NULL ? content_type : "";
+	request.accept = accept != NULL ? accept : "*/*";
+	got = leonos_net_fetch_ex(&request);
+	memset(&meta, 0, sizeof(meta));
+	(void) leonos_net_fetch_meta(&meta);
+	if (got > LEONOS_QUICKJS_FETCH_MAX) {
+		got = LEONOS_QUICKJS_FETCH_MAX;
+	}
+	body[got] = 0;
+	ok = meta.status_code >= 200u && meta.status_code < 400u && got != 0u;
+	{
+		char detail[128];
+		int detail_len = snprintf(detail, sizeof(detail),
+			"NETSURF QUICKJS FETCH result status=%u bytes=%u type=%s\r\n",
+			(unsigned int) meta.status_code,
+			(unsigned int) got,
+			meta.content_type[0] != 0 ? meta.content_type : "unknown");
+		if (detail_len > 0) {
+			leonos_write(detail);
+		}
+	}
+	JS_SetPropertyStr(ctx, response, "ok", JS_NewBool(ctx, ok));
+	JS_SetPropertyStr(ctx, response, "status",
+			  JS_NewInt32(ctx, (int32_t) meta.status_code));
+	JS_SetPropertyStr(ctx, response, "contentType",
+			  JS_NewString(ctx, meta.content_type));
+	JS_SetPropertyStr(ctx, response, "body",
+			  JS_NewStringLen(ctx, body, got));
+	free(body);
+#else
+	(void) ok;
+#endif
+	if (accept != NULL) {
+		JS_FreeCString(ctx, accept);
+	}
+	if (content_type != NULL) {
+		JS_FreeCString(ctx, content_type);
+	}
+	if (request_body != NULL) {
+		JS_FreeCString(ctx, request_body);
+	}
+	if (method != NULL) {
+		JS_FreeCString(ctx, method);
+	}
+	JS_FreeCString(ctx, url);
+	return response;
 }
 
 static JSValue qjs_dom_unsupported(JSContext *ctx, JSValueConst this_val,
@@ -357,6 +555,16 @@ static JSValue qjs_dom_add_event_listener(JSContext *ctx,
 	if (type == NULL) {
 		return JS_EXCEPTION;
 	}
+#ifdef LEONOS_USER_APP
+	if (strcmp(type, "click") == 0 ||
+	    strcmp(type, "mouseenter") == 0 ||
+	    strcmp(type, "mouseleave") == 0 ||
+	    strcmp(type, "mouseover") == 0 ||
+	    strcmp(type, "mouseout") == 0) {
+		JS_FreeCString(ctx, type);
+		return JS_UNDEFINED;
+	}
+#endif
 	list = qjs_dom_event_listener_list(ctx, this_val, type, true);
 	if (JS_IsObject(list)) {
 		length = qjs_array_length(ctx, list);
@@ -1174,6 +1382,13 @@ static void qjs_set_owner_document(JSContext *ctx, JSValueConst obj)
 	JS_FreeValue(ctx, global);
 }
 
+static JSValue qjs_basic_append_child(JSContext *ctx, JSValueConst this_val,
+				      int argc, JSValueConst *argv);
+static JSValue qjs_basic_insert_before(JSContext *ctx, JSValueConst this_val,
+				       int argc, JSValueConst *argv);
+static JSValue qjs_basic_remove_child(JSContext *ctx, JSValueConst this_val,
+				      int argc, JSValueConst *argv);
+
 static JSValue qjs_new_basic_element(JSContext *ctx,
 				     const char *tag,
 				     const char *id,
@@ -1223,9 +1438,9 @@ static JSValue qjs_new_basic_element(JSContext *ctx,
 			     qjs_dom_dispatch_event, 1);
 	qjs_install_function(ctx, obj, "focus", qjs_dom_noop, 0);
 	qjs_install_function(ctx, obj, "blur", qjs_dom_noop, 0);
-	qjs_install_function(ctx, obj, "appendChild", qjs_dom_arg0, 1);
-	qjs_install_function(ctx, obj, "insertBefore", qjs_dom_arg0, 2);
-	qjs_install_function(ctx, obj, "removeChild", qjs_dom_arg0, 1);
+	qjs_install_function(ctx, obj, "appendChild", qjs_basic_append_child, 1);
+	qjs_install_function(ctx, obj, "insertBefore", qjs_basic_insert_before, 2);
+	qjs_install_function(ctx, obj, "removeChild", qjs_basic_remove_child, 1);
 	return obj;
 }
 
@@ -2238,7 +2453,74 @@ static void qjs_sync_js_child_remove(JSContext *ctx, JSValueConst parent,
 	JS_FreeValue(ctx, child_nodes);
 }
 
+static JSValue qjs_basic_append_child(JSContext *ctx, JSValueConst this_val,
+				      int argc, JSValueConst *argv)
+{
+	if (argc < 1) {
+		return JS_UNDEFINED;
+	}
+	if (qjs_js_node_is_document_fragment(ctx, argv[0])) {
+		qjs_sync_js_fragment_insert_before(ctx, this_val, argv[0],
+						   JS_NULL);
+	} else {
+		qjs_sync_js_child_append(ctx, this_val, argv[0]);
+	}
+	return JS_DupValue(ctx, argv[0]);
+}
+
+static JSValue qjs_basic_insert_before(JSContext *ctx, JSValueConst this_val,
+				       int argc, JSValueConst *argv)
+{
+	JSValueConst ref = JS_NULL;
+
+	if (argc < 1) {
+		return JS_UNDEFINED;
+	}
+	if (argc > 1 && !JS_IsNull(argv[1]) && !JS_IsUndefined(argv[1])) {
+		ref = argv[1];
+	}
+	if (qjs_js_node_is_document_fragment(ctx, argv[0])) {
+		qjs_sync_js_fragment_insert_before(ctx, this_val, argv[0], ref);
+	} else {
+		qjs_sync_js_child_insert_before(ctx, this_val, argv[0], ref);
+	}
+	return JS_DupValue(ctx, argv[0]);
+}
+
+static JSValue qjs_basic_remove_child(JSContext *ctx, JSValueConst this_val,
+				      int argc, JSValueConst *argv)
+{
+	if (argc < 1) {
+		return JS_UNDEFINED;
+	}
+	qjs_sync_js_child_remove(ctx, this_val, argv[0]);
+	return JS_DupValue(ctx, argv[0]);
+}
+
 static void qjs_note_native_node_inserted(JSContext *ctx, dom_node *node)
+{
+	jsthread *thread = JS_GetContextOpaque(ctx);
+	const char *name;
+	if (thread == NULL || thread->htmlc == NULL || node == NULL) {
+		return;
+	}
+	name = thread->active_script_name;
+	if (name != NULL &&
+	    strstr(name, "js.rbxcdn.com/") != NULL &&
+	    strstr(name, "ReactLanding.") != NULL) {
+		html_leonos_dom_mark_dirty(thread->htmlc);
+#ifdef LEONOS_USER_APP
+		if (!thread->active_script_dom_budget_hit) {
+			leonos_write("NETSURF QUICKJS DOM REACT MUTATION BATCH\r\n");
+			thread->active_script_dom_budget_hit = true;
+		}
+#endif
+		return;
+	}
+	html_leonos_dom_node_inserted(thread->htmlc, node);
+}
+
+static void qjs_note_native_node_inserted_now(JSContext *ctx, dom_node *node)
 {
 	jsthread *thread = JS_GetContextOpaque(ctx);
 	if (thread == NULL || thread->htmlc == NULL || node == NULL) {
@@ -2262,6 +2544,11 @@ static void qjs_log_native_dom_mutation(JSContext *ctx, const char *op,
 	int detail_len;
 	const char *name;
 	if (thread == NULL || parent == NULL || child == NULL) {
+		return;
+	}
+	if (thread->active_script_dom_appends > 24u &&
+	    (thread->active_script_dom_appends &
+	     (thread->active_script_dom_appends - 1u)) != 0u) {
 		return;
 	}
 	name = thread->active_script_name;
@@ -2377,10 +2664,17 @@ static void qjs_maybe_remember_react_landing_subtree(JSContext *ctx,
 	    qjs_native_node_type(candidate) != DOM_ELEMENT_NODE) {
 		return;
 	}
+	if (thread->active_script_react_landing_candidate != NULL) {
+		return;
+	}
 	name = thread->active_script_name;
 	if (name == NULL ||
 	    strstr(name, "js.rbxcdn.com/") == NULL ||
 	    strstr(name, "ReactLanding.") == NULL) {
+		return;
+	}
+	if (thread->active_script_dom_appends < 64u &&
+	    !qjs_native_node_id_equals(candidate, "react-landing-container")) {
 		return;
 	}
 	if (qjs_native_node_id_equals(candidate, "react-landing-container") ||
@@ -2431,7 +2725,7 @@ static void qjs_attach_react_landing_candidate(JSContext *ctx)
 #ifdef LEONOS_USER_APP
 		leonos_write("NETSURF QUICKJS DOM REACT ATTACH generated subtree\r\n");
 #endif
-		qjs_note_native_node_inserted(
+		qjs_note_native_node_inserted_now(
 			ctx, thread->active_script_react_landing_candidate);
 	}
 	dom_node_unref(container);
@@ -2454,24 +2748,25 @@ static bool qjs_dom_append_budget_exceeded(JSContext *ctx)
 	}
 
 	thread->active_script_dom_appends += 1u;
-	if (thread->active_script_dom_appends <= 40u) {
-		return false;
-	}
-
+	if (thread->active_script_react_landing_candidate != NULL &&
+	    thread->active_script_dom_appends > 64u) {
+		html_leonos_dom_mark_dirty(thread->htmlc);
 #ifdef LEONOS_USER_APP
-	if (!thread->active_script_dom_budget_hit) {
-		char detail[160];
-		int detail_len = snprintf(detail, sizeof(detail),
-				"NETSURF QUICKJS DOM APPEND BUDGET %s COUNT %u\r\n",
+		if (!thread->active_script_dom_native_budget_hit) {
+			char detail[192];
+			int detail_len = snprintf(detail, sizeof(detail),
+				"NETSURF QUICKJS DOM NATIVE BUDGET %s COUNT %u\r\n",
 				name,
 				thread->active_script_dom_appends);
-		if (detail_len > 0) {
-			leonos_write(detail);
+			if (detail_len > 0) {
+				leonos_write(detail);
+			}
+			thread->active_script_dom_native_budget_hit = true;
 		}
-	}
 #endif
-	thread->active_script_dom_budget_hit = true;
-	return true;
+		return true;
+	}
+	return false;
 }
 
 static JSValue qjs_native_append_child(JSContext *ctx, JSValueConst this_val,
@@ -3071,6 +3366,14 @@ static JSValue qjs_new_dom_node_limited(JSContext *ctx, dom_node *node,
 	qjs_install_function(ctx, obj, "setAttribute", qjs_native_set_attribute, 2);
 	qjs_install_function(ctx, obj, "removeAttribute",
 			     qjs_native_remove_attribute, 1);
+	qjs_install_function(ctx, obj, "querySelector",
+			     qjs_document_query_selector, 1);
+	qjs_install_function(ctx, obj, "querySelectorAll",
+			     qjs_document_query_selector_all, 1);
+	qjs_install_function(ctx, obj, "getElementsByTagName",
+			     qjs_document_get_elements_by_tag_name, 1);
+	qjs_install_function(ctx, obj, "getElementsByClassName",
+			     qjs_document_get_elements_by_class_name, 1);
 	if (populate_children) {
 		qjs_populate_native_child_edges(ctx, obj, node);
 	}
@@ -3097,6 +3400,11 @@ static JSValue qjs_new_dom_node(JSContext *ctx, dom_node *node)
 	return qjs_new_dom_node_limited(ctx, node, 2u, true);
 }
 
+static JSValue qjs_new_dom_selector_result(JSContext *ctx, dom_node *node)
+{
+	return qjs_new_dom_node_limited(ctx, node, 1u, false);
+}
+
 static JSValue qjs_new_dom_element(JSContext *ctx, dom_element *element)
 {
 	return qjs_new_dom_node(ctx, (dom_node *) element);
@@ -3114,6 +3422,9 @@ struct qjs_simple_selector {
 	bool has_class;
 	bool has_attr;
 	bool has_not_attr;
+	bool has_checked_pseudo;
+	bool has_enabled_pseudo;
+	bool want_enabled_pseudo;
 	bool attr_has_value;
 	bool attr_dash_match;
 	bool attr_prefix_match;
@@ -3135,7 +3446,7 @@ static bool qjs_ascii_space(char ch)
 static bool qjs_selector_special(char ch)
 {
 	return ch == 0 || ch == '#' || ch == '.' || ch == '[' ||
-	       ch == ']' || ch == '>' || ch == '+' || ch == '~' ||
+	       ch == ']' || ch == ':' || ch == '>' || ch == '+' || ch == '~' ||
 	       qjs_ascii_space(ch) || ch == ',';
 }
 
@@ -3360,6 +3671,20 @@ static bool qjs_parse_selector_part(const char *text,
 				return false;
 			}
 			i += 1u;
+		} else if (text[i] == ':' && i + 8u <= end &&
+			   strncmp(text + i, ":checked", 8u) == 0) {
+			selector->has_checked_pseudo = true;
+			i += 8u;
+		} else if (text[i] == ':' && i + 8u <= end &&
+			   strncmp(text + i, ":enabled", 8u) == 0) {
+			selector->has_enabled_pseudo = true;
+			selector->want_enabled_pseudo = true;
+			i += 8u;
+		} else if (text[i] == ':' && i + 9u <= end &&
+			   strncmp(text + i, ":disabled", 9u) == 0) {
+			selector->has_enabled_pseudo = true;
+			selector->want_enabled_pseudo = false;
+			i += 9u;
 		} else {
 			selector->unsupported = true;
 			return false;
@@ -3555,10 +3880,15 @@ static bool qjs_dom_element_matches(dom_element *element,
 	if (element == NULL) {
 		return false;
 	}
-	if (selector->has_tag && selector->tag[0] != '*') {
+	if (selector->has_tag || selector->has_checked_pseudo ||
+	    selector->has_enabled_pseudo) {
 		if (dom_element_get_tag_name(element, &tag) != DOM_NO_ERR ||
-		    tag == NULL ||
-		    !qjs_ascii_equal_ci(dom_string_data(tag), selector->tag)) {
+		    tag == NULL) {
+			matched = false;
+		}
+	}
+	if (matched && selector->has_tag && selector->tag[0] != '*') {
+		if (!qjs_ascii_equal_ci(dom_string_data(tag), selector->tag)) {
 			matched = false;
 		}
 	}
@@ -3581,6 +3911,36 @@ static bool qjs_dom_element_matches(dom_element *element,
 		matched = not_attr == NULL;
 		if (not_attr != NULL) {
 			dom_string_unref(not_attr);
+		}
+	}
+	if (matched && selector->has_checked_pseudo) {
+		dom_string *checked = NULL;
+		if (qjs_ascii_equal_ci(dom_string_data(tag), "input")) {
+			qjs_read_dom_attribute(element, "checked", &checked);
+		} else if (qjs_ascii_equal_ci(dom_string_data(tag), "option")) {
+			qjs_read_dom_attribute(element, "selected", &checked);
+		}
+		matched = checked != NULL;
+		if (checked != NULL) {
+			dom_string_unref(checked);
+		}
+	}
+	if (matched && selector->has_enabled_pseudo) {
+		dom_string *disabled = NULL;
+		bool control =
+			qjs_ascii_equal_ci(dom_string_data(tag), "button") ||
+			qjs_ascii_equal_ci(dom_string_data(tag), "input") ||
+			qjs_ascii_equal_ci(dom_string_data(tag), "select") ||
+			qjs_ascii_equal_ci(dom_string_data(tag), "textarea") ||
+			qjs_ascii_equal_ci(dom_string_data(tag), "option") ||
+			qjs_ascii_equal_ci(dom_string_data(tag), "optgroup") ||
+			qjs_ascii_equal_ci(dom_string_data(tag), "fieldset");
+		qjs_read_dom_attribute(element, "disabled", &disabled);
+		matched = control &&
+			  (selector->want_enabled_pseudo ?
+				   disabled == NULL : disabled != NULL);
+		if (disabled != NULL) {
+			dom_string_unref(disabled);
 		}
 	}
 	if (tag != NULL) {
@@ -3673,21 +4033,104 @@ static JSValue qjs_new_roblox_account_experience_meta(JSContext *ctx)
 	return obj;
 }
 
+static bool qjs_query_scope_contains(dom_node *scope, dom_node *node)
+{
+	bool same = false;
+	bool contains = false;
+	if (scope == NULL) {
+		return true;
+	}
+	if (node == NULL) {
+		return false;
+	}
+	if (dom_node_is_same(scope, node, &same) == DOM_NO_ERR && same) {
+		return false;
+	}
+	if (dom_node_contains(scope, node, &contains) != DOM_NO_ERR) {
+		return false;
+	}
+	return contains;
+}
+
+static bool qjs_sync_js_child_nodes_into_native(JSContext *ctx,
+						JSValueConst obj,
+						dom_node *parent)
+{
+	JSValue child_nodes;
+	uint32_t length = 0u;
+	bool appended = false;
+
+	if (!JS_IsObject(obj) || parent == NULL) {
+		return false;
+	}
+	child_nodes = JS_GetPropertyStr(ctx, obj, "childNodes");
+	if (!JS_IsObject(child_nodes)) {
+		JS_FreeValue(ctx, child_nodes);
+		return false;
+	}
+	length = qjs_array_length(ctx, child_nodes);
+	for (uint32_t i = 0u; i < length; i++) {
+		JSValue child = JS_GetPropertyUint32(ctx, child_nodes, i);
+		dom_node *child_node = NULL;
+		bool same = false;
+		if (JS_IsObject(child)) {
+			child_node = qjs_materialize_js_node(ctx, child);
+		}
+		if (child_node != NULL &&
+		    !(dom_node_is_same(parent, child_node, &same) == DOM_NO_ERR &&
+		      same) &&
+		    !qjs_query_scope_contains(parent, child_node)) {
+			dom_node *result = NULL;
+			if (dom_node_append_child(parent, child_node,
+						  &result) == DOM_NO_ERR) {
+				appended = true;
+				if (result != NULL) {
+					dom_node_unref(result);
+				}
+			}
+		}
+		if (child_node != NULL) {
+			dom_node_unref(child_node);
+		}
+		JS_FreeValue(ctx, child);
+	}
+	JS_FreeValue(ctx, child_nodes);
+#ifdef LEONOS_USER_APP
+	if (appended) {
+		static unsigned int sync_log_count;
+		if (sync_log_count < 16u) {
+			char detail[96];
+			int detail_len = snprintf(detail, sizeof(detail),
+				"NETSURF QUICKJS DOM SCOPE SYNC children=%u\r\n",
+				(unsigned int) length);
+			sync_log_count += 1u;
+			if (detail_len > 0) {
+				leonos_write(detail);
+			}
+		}
+	}
+#endif
+	return appended;
+}
+
 static JSValue qjs_document_query_selector_all(JSContext *ctx,
 					       JSValueConst this_val,
 					       int argc,
 					       JSValueConst *argv)
 {
 	jsthread *thread = JS_GetContextOpaque(ctx);
+	struct qjs_native_node *scope = qjs_get_native_node(this_val);
 	const char *selector_text;
 	struct qjs_selector_chain chain;
 	const struct qjs_simple_selector *leaf;
 	dom_string *tag_name = NULL;
 	dom_nodelist *nodes = NULL;
+	dom_node *scope_node = scope != NULL ? scope->node : NULL;
+	dom_node_type scope_type = DOM_NODE_TYPE_COUNT;
+	bool scoped_element_query = false;
 	uint32_t length = 0u;
 	uint32_t out_index = 0u;
 	JSValue list = qjs_new_dom_node_array(ctx);
-	(void) this_val;
 	if (thread == NULL || thread->htmlc == NULL ||
 	    thread->htmlc->document == NULL || argc < 1) {
 		return list;
@@ -3737,10 +4180,22 @@ static JSValue qjs_document_query_selector_all(JSContext *ctx,
 		JS_FreeCString(ctx, selector_text);
 		return list;
 	}
-	if (dom_document_get_elements_by_tag_name(thread->htmlc->document,
-						  tag_name,
-						  &nodes) == DOM_NO_ERR &&
-	    nodes != NULL &&
+	if (scope_node != NULL &&
+	    dom_node_get_node_type(scope_node, &scope_type) == DOM_NO_ERR &&
+	    scope_type == DOM_ELEMENT_NODE) {
+		(void) qjs_sync_js_child_nodes_into_native(ctx, this_val,
+							   scope_node);
+		if (dom_element_get_elements_by_tag_name(
+			    (dom_element *) scope_node, tag_name, &nodes) ==
+		    DOM_NO_ERR) {
+			scoped_element_query = true;
+		}
+	} else {
+		(void) dom_document_get_elements_by_tag_name(thread->htmlc->document,
+							     tag_name,
+							     &nodes);
+	}
+	if (nodes != NULL &&
 	    dom_nodelist_get_length(nodes, &length) == DOM_NO_ERR) {
 		for (uint32_t i = 0u; i < length && out_index < 512u; i++) {
 			dom_node *node = NULL;
@@ -3751,12 +4206,13 @@ static JSValue qjs_document_query_selector_all(JSContext *ctx,
 			}
 			if (dom_node_get_node_type(node, &type) == DOM_NO_ERR &&
 			    type == DOM_ELEMENT_NODE &&
+			    (scoped_element_query ||
+			     qjs_query_scope_contains(scope_node, node)) &&
 			    qjs_dom_element_matches_chain((dom_element *) node,
 							  &chain)) {
 				JS_DefinePropertyValueUint32(ctx, list,
 					out_index++,
-					qjs_new_dom_element(ctx,
-							    (dom_element *) node),
+					qjs_new_dom_selector_result(ctx, node),
 					JS_PROP_C_W_E);
 			}
 			dom_node_unref(node);
@@ -3845,6 +4301,44 @@ static JSValue qjs_document_get_elements_by_class_name(JSContext *ctx,
 	(void) snprintf(selector_text, sizeof(selector_text), ".%s",
 			class_text);
 	JS_FreeCString(ctx, class_text);
+	selector_arg = JS_NewString(ctx, selector_text);
+	result = qjs_document_query_selector_all(ctx, this_val, 1,
+						 &selector_arg);
+	JS_FreeValue(ctx, selector_arg);
+	return result;
+}
+
+static JSValue qjs_document_get_elements_by_name(JSContext *ctx,
+						 JSValueConst this_val,
+						 int argc,
+						 JSValueConst *argv)
+{
+	const char *name_text;
+	char selector_text[160];
+	size_t out = 0u;
+	JSValue selector_arg;
+	JSValue result;
+	if (argc < 1) {
+		return qjs_new_dom_node_array(ctx);
+	}
+	name_text = JS_ToCString(ctx, argv[0]);
+	if (name_text == NULL) {
+		return qjs_new_dom_node_array(ctx);
+	}
+	(void) snprintf(selector_text, sizeof(selector_text), "[name=\"");
+	out = strlen(selector_text);
+	for (size_t i = 0u; name_text[i] != 0 &&
+	     out + 3u < sizeof(selector_text); i++) {
+		char ch = name_text[i];
+		if (ch == '"' || ch == ']' || ch == '\\') {
+			break;
+		}
+		selector_text[out++] = ch;
+	}
+	selector_text[out++] = '"';
+	selector_text[out++] = ']';
+	selector_text[out] = 0;
+	JS_FreeCString(ctx, name_text);
 	selector_arg = JS_NewString(ctx, selector_text);
 	result = qjs_document_query_selector_all(ctx, this_val, 1,
 						 &selector_arg);
@@ -4145,6 +4639,8 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"Element.prototype.focus=Element.prototype.focus||noop;Element.prototype.blur=Element.prototype.blur||noop;"
 		"Element.prototype.contains=Element.prototype.contains||function(n){"
 		"for(;n;n=n.parentNode||n.parentElement){if(n===this)return true;}return false;};"
+		"function rect(e){var w=Number((e&&(e.clientWidth||e.offsetWidth))||g.innerWidth||1)||1,h=Number((e&&(e.clientHeight||e.offsetHeight))||g.innerHeight||1)||1;return {x:0,y:0,top:0,left:0,right:w,bottom:h,width:w,height:h};}"
+		"Element.prototype.getBoundingClientRect=Element.prototype.getBoundingClientRect||function(){return rect(this);};"
 		"function textNode(v){return {nodeType:3,nodeName:'#text',nodeValue:String(v||''),"
 		"textContent:String(v||''),parentNode:null,parentElement:null,cloneNode:function(){return textNode(this.nodeValue);}};}"
 		"function resetKids(e){if(!e.childNodes)e.childNodes=arr();e.childNodes.length=0;e.children=e.childNodes;"
@@ -4234,13 +4730,13 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"e.cloneNode=function(deep){return cloneElem(e,!!deep);};return e;}"
 		"g.window=g.window||g;g.self=g.self||g;g.globalThis=g.globalThis||g;"
 		"g.top=g.top||g;g.parent=g.parent||g;g.frames=g.frames||g;g.length=g.length||0;"
-		"eventful(g);var rawAddEvt=g.addEventListener;g.addEventListener=function(n,f){rawAddEvt.call(g,n,f);"
-		"if(typeof f==='function'&&(n==='load'||n==='DOMContentLoaded'||n==='readystatechange'))g.setTimeout(function(){callEvt(g,f,evtObj(n));},0);};"
+		"eventful(g);var rawAddEvt=g.addEventListener;g.addEventListener=function(n,f){rawAddEvt.call(g,n,f);};"
 		"g.scroll=g.scroll||noop;g.scrollTo=g.scrollTo||g.scroll;g.scrollBy=g.scrollBy||noop;"
-		"var nextTimer=1,timerDepth=0,timerCalls=0;"
-		"g.setTimeout=g.setTimeout||function(f){var id=nextTimer++;"
-		"if(typeof f==='function'&&timerDepth<2&&timerCalls<32){timerDepth++;timerCalls++;"
-		"try{f();}catch(e){try{g._DumpException(e);}catch(x){}}timerDepth--;}return id;};"
+		"var nextTimer=1,timerDepth=0,timerCalls=0;g.__leonosExtraTimerBudget=g.__leonosExtraTimerBudget||0;"
+		"g.setTimeout=g.setTimeout||function(f){var id=nextTimer++,maxDepth=Number(g.__leonosTimerDepthLimit||2)||2;"
+		"if(typeof f==='function'&&timerDepth<maxDepth){var extra=Number(g.__leonosExtraTimerBudget||0)||0;"
+		"if(timerCalls<32||extra>0){timerDepth++;if(timerCalls<32)timerCalls++;else g.__leonosExtraTimerBudget=extra-1;"
+		"try{f();}catch(e){try{g._DumpException(e);}catch(x){}}timerDepth--;}}return id;};"
 		"g.clearTimeout=g.clearTimeout||noop;g.setInterval=g.setInterval||g.setTimeout;"
 		"g.clearInterval=g.clearInterval||noop;"
 		"g.requestAnimationFrame=g.requestAnimationFrame||function(f){return g.setTimeout(f,16);};"
@@ -4298,7 +4794,7 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"g.msCrypto=g.msCrypto||cr;"
 		"g.matchMedia=g.matchMedia||function(q){return {matches:false,media:String(q||''),onchange:null,"
 		"addEventListener:noop,removeEventListener:noop,addListener:noop,removeListener:noop,dispatchEvent:function(){return true;}};};"
-		"function Obs(cb){this.callback=cb||noop;}Obs.prototype.observe=noop;Obs.prototype.unobserve=noop;"
+		"function Obs(cb){this.callback=cb||noop;}Obs.prototype.observe=function(t){var cb=this.callback;if(typeof cb==='function'){try{cb([{target:t,isIntersecting:true,intersectionRatio:1,boundingClientRect:rect(t),intersectionRect:rect(t),rootBounds:null}],this);}catch(e){try{g._DumpException(e);}catch(x){}}}};Obs.prototype.unobserve=noop;"
 		"Obs.prototype.disconnect=noop;Obs.prototype.takeRecords=function(){return [];};"
 		"g.MutationObserver=g.MutationObserver||Obs;g.WebKitMutationObserver=g.WebKitMutationObserver||g.MutationObserver;"
 		"g.ResizeObserver=g.ResizeObserver||Obs;g.IntersectionObserver=g.IntersectionObserver||Obs;"
@@ -4318,6 +4814,44 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"g.btoa=g.btoa||function(s){s=String(s||'');var out='',i,a,b,c;for(i=0;i<s.length;i++)if(s.charCodeAt(i)>255)throw Error('InvalidCharacterError');"
 		"for(i=0;i<s.length;i+=3){a=s.charCodeAt(i);b=i+1<s.length?s.charCodeAt(i+1):0;c=i+2<s.length?s.charCodeAt(i+2):0;"
 		"out+=b64.charAt(a>>2)+b64.charAt(((a&3)<<4)|(b>>4))+(i+1<s.length?b64.charAt(((b&15)<<2)|(c>>6)):'=')+(i+2<s.length?b64.charAt(c&63):'=');}return out;};"
+		"function absUrl(u){var a=el('a');setAnchor(a,String(u||''));return a.href||String(u||'');}"
+		"if(!Object.fromEntries)Object.fromEntries=function(it){var o={},e,i;if(!it)return o;if(typeof it[Symbol.iterator]==='function'){for(var a=it[Symbol.iterator]();!(e=a.next()).done;){i=e.value;if(i)o[i[0]]=i[1];}}return o;};"
+		"if(!g.Headers){g.Headers=function(init){this._m={};var self=this;function add(k,v){self.set(k,v);}if(init instanceof g.Headers)init.forEach(add);else if(init&&typeof init.length==='number'){for(var i=0;i<init.length;i++)if(init[i])add(init[i][0],init[i][1]);}else if(init&&typeof init==='object'){for(var k in init)if(init.hasOwnProperty(k))add(k,init[k]);}};"
+		"var hp=g.Headers.prototype;hp.append=function(k,v){k=String(k||'').toLowerCase();this._m[k]=this._m[k]?this._m[k]+', '+String(v):String(v);};hp.set=function(k,v){this._m[String(k||'').toLowerCase()]=String(v);};hp.get=function(k){k=String(k||'').toLowerCase();return this._m.hasOwnProperty(k)?this._m[k]:null;};hp.has=function(k){return this.get(k)!==null;};hp.delete=function(k){delete this._m[String(k||'').toLowerCase()];};"
+		"hp.forEach=function(f,t){for(var k in this._m)if(this._m.hasOwnProperty(k))f.call(t,this._m[k],k,this);};hp.entries=function(){var a=[];this.forEach(function(v,k){a.push([k,v]);});return uspIter(a);};hp.keys=function(){var a=[];this.forEach(function(v,k){a.push(k);});return uspIter(a);};hp.values=function(){var a=[];this.forEach(function(v){a.push(v);});return uspIter(a);};hp[Symbol.iterator]=hp.entries;}"
+		"function strBuf(s){s=String(s||'');var a=new Uint8Array(s.length);for(var i=0;i<s.length;i++)a[i]=s.charCodeAt(i)&255;return a.buffer;}"
+		"function bodyStr(b){if(b==null)return '';if(g.URLSearchParams&&b instanceof g.URLSearchParams)return b.toString();"
+		"if(typeof ArrayBuffer!=='undefined'&&b instanceof ArrayBuffer){var aa=new Uint8Array(b),ss='';for(var ai=0;ai<aa.length;ai++)ss+=String.fromCharCode(aa[ai]);return ss;}"
+		"if(typeof ArrayBuffer!=='undefined'&&ArrayBuffer.isView&&ArrayBuffer.isView(b)){var av=new Uint8Array(b.buffer,b.byteOffset||0,b.byteLength||b.length||0),sv='';for(var vi=0;vi<av.length;vi++)sv+=String.fromCharCode(av[vi]);return sv;}"
+		"return String(b);}"
+		"function reqData(input,init){init=init||{};var src=input&&typeof input==='object'?input:null,h=new g.Headers(src&&src.headers?src.headers:null);"
+		"if(init.headers)new g.Headers(init.headers).forEach(function(v,k){h.set(k,v);});var hasBody=Object.prototype.hasOwnProperty.call(init,'body')||(src&&src._body!==void 0);"
+		"var rawBody=Object.prototype.hasOwnProperty.call(init,'body')?init.body:(src&&src._body!==void 0?src._body:void 0);"
+		"var m=String(init.method||(src&&src.method)||'GET').toUpperCase();if((m==='GET'||m==='HEAD')&&hasBody){rawBody=void 0;hasBody=false;}"
+		"var ct=h.get('content-type')||'';if(!ct&&hasBody&&g.URLSearchParams&&rawBody instanceof g.URLSearchParams)ct='application/x-www-form-urlencoded;charset=UTF-8';"
+		"else if(!ct&&hasBody&&typeof rawBody==='string')ct='text/plain;charset=UTF-8';"
+		"return {url:absUrl(src&&src.url?src.url:input),method:m,headers:h,body:hasBody?bodyStr(rawBody):'',contentType:ct,accept:h.get('accept')||'*/*'};}"
+		"function leonosResp(r,u){r=r||{};var b=String(r.body||''),s=Number(r.status||0)||0,ct=String(r.contentType||''),hh=new g.Headers();if(ct)hh.set('content-type',ct);"
+		"return {ok:!!r.ok,status:s,statusText:'',url:String(r.url||u||''),headers:hh,bodyUsed:false,"
+		"text:function(){this.bodyUsed=true;return Promise.resolve(b);},arrayBuffer:function(){this.bodyUsed=true;return Promise.resolve(strBuf(b));},"
+		"json:function(){this.bodyUsed=true;try{return Promise.resolve(b?JSON.parse(b):null);}catch(e){return Promise.reject(e);}},"
+		"clone:function(){return leonosResp(r,u);}};}"
+		"g.Response=g.Response||function(body,init){init=init||{};var h=new g.Headers(init.headers||null),ct=h.get('content-type')||'';var r={ok:!init.status||init.status<400,status:init.status||200,contentType:ct,body:bodyStr(body)};return leonosResp(r,'');};"
+		"if(!g.Request)g.Request=function(input,init){var r=reqData(input,init||{});this.url=r.url;this.method=r.method;this.headers=r.headers;this._body=r.body;this.bodyUsed=false;};"
+		"if(g.Request&&!g.Request.prototype.clone)g.Request.prototype.clone=function(){return new g.Request(this,{method:this.method,headers:this.headers,body:this._body});};"
+		"if(g.Request&&!g.Request.prototype.text)g.Request.prototype.text=function(){this.bodyUsed=true;return Promise.resolve(this._body||'');};"
+		"if(!g.fetch&&g._leonosFetchText)g.fetch=function(input,init){var q=reqData(input,init||{});try{return Promise.resolve(leonosResp(g._leonosFetchText(q.url,q.method,q.body,q.contentType,q.accept),q.url));}catch(e){return Promise.reject(e);}};"
+		"function xhrFire(x,t){return x.dispatchEvent?x.dispatchEvent(evtObj(t)):true;}"
+		"if(!g.XMLHttpRequest&&g._leonosFetchText){var XHR=function(){eventful(this);this.readyState=0;this.responseType='';this.responseText='';this.response=null;this.responseURL='';this.status=0;this.statusText='';this.timeout=0;this.withCredentials=false;this.upload=eventful({});this._headers={};this._respHeaders={};};"
+		"XHR.UNSENT=0;XHR.OPENED=1;XHR.HEADERS_RECEIVED=2;XHR.LOADING=3;XHR.DONE=4;var xp=XHR.prototype;xp.UNSENT=0;xp.OPENED=1;xp.HEADERS_RECEIVED=2;xp.LOADING=3;xp.DONE=4;"
+		"xp.open=function(m,u,a){this._method=String(m||'GET').toUpperCase();this._url=absUrl(u||'');this._async=a!==false;this.readyState=1;xhrFire(this,'readystatechange');};"
+		"xp.setRequestHeader=function(n,v){this._headers[String(n||'').toLowerCase()]=String(v||'');};"
+		"xp.getResponseHeader=function(n){n=String(n||'').toLowerCase();return this._respHeaders.hasOwnProperty(n)?this._respHeaders[n]:null;};"
+		"xp.getAllResponseHeaders=function(){var out='';for(var k in this._respHeaders)if(this._respHeaders.hasOwnProperty(k))out+=k+': '+this._respHeaders[k]+'\\r\\n';return out;};"
+		"xp.overrideMimeType=function(t){this._overrideMime=String(t||'');};"
+		"xp.abort=function(){this.readyState=0;this.status=0;this.responseText='';this.response=null;xhrFire(this,'abort');xhrFire(this,'loadend');};"
+		"xp.send=function(body){var self=this;function finish(){var r,ct,rb,acc;try{self.readyState=2;xhrFire(self,'readystatechange');rb=(self._method==='GET'||self._method==='HEAD')?'':bodyStr(body);ct=self._headers['content-type']||'';acc=self._headers['accept']||'*/*';r=g._leonosFetchText(self._url,self._method||'GET',rb,ct,acc);self.status=Number(r.status||0)||0;self.statusText='';self.responseURL=String(r.url||self._url||'');ct=String(self._overrideMime||r.contentType||'');self._respHeaders={};if(ct)self._respHeaders['content-type']=ct;self.readyState=3;xhrFire(self,'readystatechange');self.responseText=String(r.body||'');if(self.responseType==='json'){try{self.response=self.responseText?JSON.parse(self.responseText):null;}catch(e){self.response=null;}}else if(self.responseType==='arraybuffer')self.response=strBuf(self.responseText);else self.response=self.responseText;self.readyState=4;xhrFire(self,'readystatechange');xhrFire(self,(self.status>=200&&self.status<400)?'load':'error');xhrFire(self,'loadend');}catch(e){self.status=0;self.readyState=4;xhrFire(self,'readystatechange');xhrFire(self,'error');xhrFire(self,'loadend');}}if(this._async)g.setTimeout(finish,0);else finish();};"
+		"g.XMLHttpRequest=XHR;}"
 		"function uspDec(s){try{return decodeURIComponent(String(s||'').replace(/\\+/g,' '));}catch(e){return String(s||'');}}"
 		"function uspEnc(s){return encodeURIComponent(String(s)).replace(/%20/g,'+');}"
 		"function uspIter(a){var i=0;return {next:function(){return i<a.length?{value:a[i++],done:false}:{value:void 0,done:true};},"
@@ -4380,7 +4914,9 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"return jqObj(r);}g.$=g.$||jq;g.jQuery=g.jQuery||g.$;g.$.fn=g.jQuery.fn=jqObj(arr());"
 		"g.$.extend=g.jQuery.extend=function(t){t=t||{};for(var i=1;i<arguments.length;i++){var o=arguments[i]||{};for(var k in o)t[k]=o[k];}return t;};"
 		"g.$.each=g.jQuery.each=function(o,f){if(!o||!f)return o;var i;if(typeof o.length==='number'){for(i=0;i<o.length;i++)f.call(o[i],i,o[i]);}else{for(i in o)if(o.hasOwnProperty(i))f.call(o[i],i,o[i]);}return o;};"
-		"g.$.ajax=g.jQuery.ajax=function(){return Promise.resolve({});};g.$.get=g.jQuery.get=function(){return Promise.resolve({});};g.$.post=g.jQuery.post=function(){return Promise.resolve({});};"
+		"function ajaxReq(u,o){if(u&&typeof u==='object'){o=u;u=o.url;}o=o||{};u=absUrl(u||'');if(!u||!g.fetch)return Promise.resolve({});"
+		"return g.fetch(u,o).then(function(r){return r.text().then(function(t){if(o.dataType==='json'){try{return JSON.parse(t);}catch(e){return {};}}return t;});}).catch(function(){return {};});}"
+		"g.$.ajax=g.jQuery.ajax=ajaxReq;g.$.get=g.jQuery.get=function(u){return ajaxReq(u,{method:'GET'});};g.$.post=g.jQuery.post=function(){return Promise.resolve({});};"
 		"var ngmod={config:function(){return ngmod;},run:function(){return ngmod;},controller:function(){return ngmod;},service:function(){return ngmod;},factory:function(){return ngmod;},directive:function(){return ngmod;},filter:function(){return ngmod;},constant:function(){return ngmod;},value:function(){return ngmod;},provider:function(){return ngmod;},component:function(){return ngmod;}};"
 		"g.angular=g.angular||{module:function(){return ngmod;},element:function(e){return g.$?g.$(e):e;},noop:noop,copy:function(o){return o;},extend:g.$.extend,forEach:g.$.each,isArray:Array.isArray,isString:function(v){return typeof v==='string';},isObject:function(v){return v!==null&&typeof v==='object';}};"
 		"g.Roblox=g.Roblox||{};var rb=g.Roblox;"
@@ -4408,10 +4944,17 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"eu.shareLinksApi=eu.shareLinksApi||'https://sharelinks.roblox.com';eu.shareLinksApiV2=eu.shareLinksApiV2||'https://sharelinks.roblox.com';"
 		"eu.assetDeliveryApi=eu.assetDeliveryApi||'https://assetdelivery.roblox.com';eu.chatApi=eu.chatApi||'https://chat.roblox.com';"
 		"eu.voiceApi=eu.voiceApi||'https://voice.roblox.com';eu.translationRolesApi=eu.translationRolesApi||'https://translationroles.roblox.com';"
-		"eu.stripeCheckoutDomain=eu.stripeCheckoutDomain||'https://checkout.stripe.com';"
+		"eu.beaconApi=eu.beaconApi||'https://metrics.roblox.com';eu.stripeCheckoutDomain=eu.stripeCheckoutDomain||'https://checkout.stripe.com';"
 		"rb['core-scripts']=rb['core-scripts']||{};var cs=rb['core-scripts'];cs.environmentUrls=cs.environmentUrls||eu;"
+		"cs.auth=cs.auth||{};cs.auth.xsrfToken=cs.auth.xsrfToken||{getToken:function(){return '';},setToken:noop,refreshToken:function(){return Promise.resolve('');}};"
 		"function ok(v){return Promise.resolve({data:v||{},status:200});}"
-		"cs.http=cs.http||{};cs.http.http=cs.http.http||{get:function(){return ok({});},post:function(){return ok({});},put:function(){return ok({});},delete:function(){return ok({});}};"
+		"function qval(v){return v==null?'':String(v);}function qstr(o){var a=[];if(!o)return '';for(var k in o)if(o.hasOwnProperty(k)){var v=o[k];if(v==null)continue;if(Array.isArray(v)){for(var i=0;i<v.length;i++)a.push(encodeURIComponent(k)+'='+encodeURIComponent(qval(v[i])));}else a.push(encodeURIComponent(k)+'='+encodeURIComponent(qval(v)));}return a.join('&');}"
+		"function withQuery(u,p){var q=qstr(p);return q?u+(u.indexOf('?')>=0?'&':'?')+q:u;}"
+		"function httpJson(m,u,d){u=absUrl(u&&u.url?u.url:u);m=String(m||'GET').toUpperCase();var o={method:m,credentials:'include',headers:{accept:'application/json'}};if(m==='GET')u=withQuery(u,d);else if(d!==void 0){o.body=JSON.stringify(d||{});o.headers['content-type']='application/json';}if(g.fetch&&u){console.log('LEONOS HTTP '+m+' '+u);return g.fetch(u,o).then(function(r){return r.text().then(function(t){var data={};try{data=t?JSON.parse(t):{};}catch(e){data={};}return {data:data,status:r.status};});}).catch(function(e){console.error(e);return {data:{},status:0};});}return ok({});}"
+		"function httpGet(u,p){return httpJson('GET',u,p);}function httpPost(u,p){return httpJson('POST',u,p);}"
+		"g.__leonosRobloxHttp={get:httpGet,post:httpPost,put:function(u,p){return httpJson('PUT',u,p);},delete:function(u,p){return httpJson('DELETE',u,p);}};"
+		"g.__leonosInstallRobloxHttp=function(){var rb=g.Roblox=g.Roblox||{},cs=rb['core-scripts']=rb['core-scripts']||{};cs.http=cs.http||{};cs.http.http=g.__leonosRobloxHttp;if(g.CoreUtilities)g.CoreUtilities.httpService=g.__leonosRobloxHttp;if(g.CoreRobloxUtilities){g.CoreRobloxUtilities.http=g.__leonosRobloxHttp;g.CoreRobloxUtilities.httpService=g.__leonosRobloxHttp;}return g.__leonosRobloxHttp;};"
+		"cs.http=cs.http||{};cs.http.http=cs.http.http||g.__leonosRobloxHttp;"
 		"cs.eventStream=cs.eventStream||{sendEvent:noop,SendEvent:noop,SendEventWithTarget:noop,LocalEventLog:[],TargetTypes:{DEFAULT:0,WWW:1}};"
 		"cs.eventStream.Init=cs.eventStream.Init||noop;cs.eventStream.init=cs.eventStream.init||cs.eventStream.Init;"
 		"cs.eventStream.sendEvent=cs.eventStream.sendEvent||noop;cs.eventStream.sendEventWithTarget=cs.eventStream.sendEventWithTarget||noop;"
@@ -4452,7 +4995,13 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"cs.cryptoUtil.generateSigningKeyPairUnextractable=cs.cryptoUtil.generateSigningKeyPairUnextractable||function(){return Promise.resolve({publicKey:{},privateKey:{}});};"
 		"cs.cryptoUtil.exportPublicKeyAsSpki=cs.cryptoUtil.exportPublicKeyAsSpki||function(){return Promise.resolve('');};cs.cryptoUtil.sign=cs.cryptoUtil.sign||function(){return Promise.resolve('');};"
 		"cs.game=cs.game||{};cs.react=cs.react||{};cs.realtime=cs.realtime||{};cs.intl=cs.intl||{intl:g.Intl||{}};"
+		"function BatchRequestFactory(){}"
+		"BatchRequestFactory.prototype.createExponentialBackoffCooldown=function(min,max){return function(){return Number(min||max||0)||0;};};"
+		"BatchRequestFactory.prototype.createRequestProcessor=function(process,key,opts){opts=opts||{};return {queueItem:function(item){return Promise.resolve().then(function(){return process([item]);}).then(function(res){var want=key?String(key(item)):String(item&&item.taskId||'');if(Array.isArray(res)){if(res.length===1)return res[0];for(var i=0;i<res.length;i++){var got=key?String(key(res[i])):String(res[i]&&res[i].taskId||'');if(got===want)return res[i];}}if(res&&Array.isArray(res.data)){for(var j=0;j<res.data.length;j++){var gd=key?String(key(res.data[j])):String(res.data[j]&&res.data[j].taskId||'');if(gd===want)return res.data[j];}}return res;});},processBatch:function(items){return process(items||[]);},invalidateItem:noop,options:opts};};"
+		"g.__leonosBatchRequestFactory=typeof g.__leonosBatchRequestFactory==='function'?g.__leonosBatchRequestFactory:BatchRequestFactory;"
+		"cs.util.batchRequest=typeof cs.util.batchRequest==='function'?cs.util.batchRequest:g.__leonosBatchRequestFactory;"
 		"g.CoreUtilities=g.CoreUtilities||{uuidService:{generateRandomUuid:function(){return cr.randomUUID();}},ready:cs.util.ready,url:cs.util.url};"
+		"g.CoreUtilities.BatchRequestFactory=typeof g.CoreUtilities.BatchRequestFactory==='function'?g.CoreUtilities.BatchRequestFactory:g.__leonosBatchRequestFactory;"
 		"g.CoreUtilities.urlService=g.CoreUtilities.urlService||cs.util.url;g.CoreUtilities.httpService=g.CoreUtilities.httpService||cs.http.http;"
 		"g.CoreUtilities.Endpoints=g.CoreUtilities.Endpoints||cs.endpoints;g.CoreUtilities.endpoints=g.CoreUtilities.endpoints||cs.endpoints;"
 		"g.CoreRobloxUtilities=g.CoreRobloxUtilities||{};var cru=g.CoreRobloxUtilities;"
@@ -4488,9 +5037,11 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"rb.Lang.get=rb.Lang.get||function(k){return String(k||'');};"
 		"rb.Lang.getTranslationResource=rb.Lang.getTranslationResource||function(n){return rb.LangDynamic[String(n||'')]||{};};"
 		"rb.Lang.getResource=rb.Lang.getResource||rb.Lang.getTranslationResource;rb.Lang.translate=rb.Lang.translate||rb.Lang.get;"
-		"rb.Thumbnails=rb.Thumbnails||{};rb.Thumbnails.Thumbnail2d=rb.Thumbnails.Thumbnail2d||function(){return null;};"
+		"function thumbImg(p){p=p||{};var src=p.imageUrl||p.thumbnailUrl||p.src||p.url||(p.thumbnail&&p.thumbnail.imageUrl)||(p.thumbnail&&p.thumbnail.url)||'';"
+		"var R=g.React,props={src:src,alt:p.alt||p.name||'',className:p.className||''};if(p.width)props.width=p.width;if(p.height)props.height=p.height;return R&&R.createElement?R.createElement('img',props):null;}"
+		"rb.Thumbnails=rb.Thumbnails||{};rb.Thumbnails.Thumbnail2d=rb.Thumbnails.Thumbnail2d||thumbImg;"
 		"rb.Thumbnails.ThumbnailTypes=rb.Thumbnails.ThumbnailTypes||{gameIcon:'gameIcon',gameThumbnail:'gameThumbnail',assetThumbnail:'assetThumbnail',avatarHeadshot:'avatarHeadshot'};"
-		"rb.Thumbnails.ThumbnailFormat=rb.Thumbnails.ThumbnailFormat||{jpeg:'jpeg',webp:'webp',png:'png'};"
+		"rb.Thumbnails.ThumbnailFormat=rb.Thumbnails.ThumbnailFormat||{jpeg:'jpeg',webp:'png',png:'png'};"
 		"rb.Thumbnails.DefaultThumbnailSize=rb.Thumbnails.DefaultThumbnailSize||'150x150';"
 		"rb.Thumbnails.ThumbnailAvatarHeadshotSize=rb.Thumbnails.ThumbnailAvatarHeadshotSize||{size48:'48x48',size150:'150x150',size352:'352x352'};"
 		"rb.Thumbnails.ThumbnailGameThumbnailSize=rb.Thumbnails.ThumbnailGameThumbnailSize||{width384:'384x216',width480:'480x270',width576:'576x324',width768:'768x432'};"
@@ -4517,7 +5068,7 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"rb.ui.Button=rb.ui.Button||g.ReactStyleGuide.Button;rb.ui.Link=rb.ui.Link||g.ReactStyleGuide.Link;rb.ui.Modal=rb.ui.Modal||g.ReactStyleGuide.Modal;rb.ui.Alert=rb.ui.Alert||g.ReactStyleGuide.Alert;"
 		"g.WebBlox=g.WebBlox||rb.ui;"
 		"var d=g.document=g.document||{};Object.setPrototypeOf&&Object.setPrototypeOf(d,Document.prototype);"
-		"d.nodeType=9;d.readyState='complete';d.cookie=d.cookie||'';d.referrer=d.referrer||'';"
+		"d.nodeType=9;d.readyState='loading';d.cookie=d.cookie||'';d.referrer=d.referrer||'';"
 		"d.compatMode=d.compatMode||'CSS1Compat';"
 		"var fallbackEl=null;function fallback(){if(!fallbackEl){fallbackEl=el('div');fallbackEl.appendChild(el('span'));}return fallbackEl;}"
 		"d.createElement=function(t){return el(t);};d.createTextNode=function(t){return textNode(t);};"
@@ -4530,8 +5081,7 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"d.implementation.createHTMLDocument=d.implementation.createHTMLDocument||function(){var x={};Object.setPrototypeOf&&Object.setPrototypeOf(x,Document.prototype);x.createElement=d.createElement;x.createTextNode=d.createTextNode;x.createDocumentFragment=d.createDocumentFragment;x.createEvent=d.createEvent;x.head=el('head');x.body=el('body');x.documentElement=el('html');x.defaultView=g;x[0]=x;x.length=1;x.item=function(i){return i===0?x:null;};x.documentElement.ownerDocument=x;x.head.ownerDocument=x;x.body.ownerDocument=x;return x;};"
 		"d.getElementById=function(){return fallback();};d.querySelector=function(){return fallback();};"
 		"d.querySelectorAll=arr;d.getElementsByTagName=function(t){var a=arr();t=String(t||'').toLowerCase();if(t==='head')a.push(d.head);else if(t==='body')a.push(d.body);return a;};"
-		"d.getElementsByClassName=arr;eventful(d);var docAddEvt=d.addEventListener;d.addEventListener=function(n,f){docAddEvt.call(d,n,f);"
-		"if(typeof f==='function'&&(n==='DOMContentLoaded'||n==='readystatechange'||n==='load'))g.setTimeout(function(){callEvt(d,f,evtObj(n));},0);};"
+		"d.getElementsByClassName=arr;eventful(d);var docAddEvt=d.addEventListener;d.addEventListener=function(n,f){docAddEvt.call(d,n,f);};"
 		"d.documentElement=d.documentElement||el('html');d.head=d.head||el('head');d.body=d.body||el('body');"
 		"d.defaultView=g;d[0]=d;d.length=1;d.item=function(i){return i===0?d:null;};"
 		"d.documentElement.ownerDocument=d;d.head.ownerDocument=d;d.body.ownerDocument=d;"
@@ -4550,6 +5100,36 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 	JS_FreeValue(ctx, result);
 }
 
+static void qjs_refresh_runtime_shims(JSContext *ctx)
+{
+	static const char shims[] =
+		"(function(g){"
+		"function noop(){return void 0;}"
+		"var BF=g.__leonosBatchRequestFactory;"
+		"if(typeof BF!=='function'){"
+		"BF=function(){};"
+		"BF.prototype.createExponentialBackoffCooldown=function(min,max){return function(){return Number(min||max||0)||0;};};"
+		"BF.prototype.createRequestProcessor=function(process,key,opts){opts=opts||{};return {queueItem:function(item){return Promise.resolve().then(function(){return process([item]);}).then(function(res){var want=key?String(key(item)):String(item&&item.taskId||'');if(Array.isArray(res)){if(res.length===1)return res[0];for(var i=0;i<res.length;i++){var got=key?String(key(res[i])):String(res[i]&&res[i].taskId||'');if(got===want)return res[i];}}if(res&&Array.isArray(res.data)){for(var j=0;j<res.data.length;j++){var gd=key?String(key(res.data[j])):String(res.data[j]&&res.data[j].taskId||'');if(gd===want)return res.data[j];}}return res;});},processBatch:function(items){return process(items||[]);},invalidateItem:noop,options:opts};};"
+		"g.__leonosBatchRequestFactory=BF;"
+		"}"
+		"var rb=g.Roblox=g.Roblox||{};"
+		"var cs=rb['core-scripts']=rb['core-scripts']||{};"
+		"cs.util=cs.util||{};"
+		"if(typeof cs.util.batchRequest!=='function')cs.util.batchRequest=BF;"
+		"g.CoreUtilities=g.CoreUtilities||{};"
+		"if(typeof g.CoreUtilities.BatchRequestFactory!=='function')g.CoreUtilities.BatchRequestFactory=BF;"
+		"g.CoreRobloxUtilities=g.CoreRobloxUtilities||{};"
+		"g.CoreRobloxUtilities.coreScripts=g.CoreRobloxUtilities.coreScripts||cs;"
+		"})(globalThis);";
+	JSValue result = JS_Eval(ctx, shims, sizeof(shims) - 1u,
+				 "leonos-quickjs-runtime-shims.js",
+				 JS_EVAL_TYPE_GLOBAL);
+	if (JS_IsException(result)) {
+		qjs_dump_exception(ctx, "leonos-quickjs-runtime-shims.js");
+	}
+	JS_FreeValue(ctx, result);
+}
+
 static void qjs_install_globals(JSContext *ctx)
 {
 	JSValue global = JS_GetGlobalObject(ctx);
@@ -4561,6 +5141,8 @@ static void qjs_install_globals(JSContext *ctx)
 	JS_SetPropertyStr(ctx, global, "window", JS_DupValue(ctx, global));
 	JS_SetPropertyStr(ctx, global, "self", JS_DupValue(ctx, global));
 	JS_SetPropertyStr(ctx, global, "globalThis", JS_DupValue(ctx, global));
+	qjs_install_function(ctx, global, "_leonosFetchText",
+			     qjs_leonos_fetch_text, 1);
 
 	qjs_install_function(ctx, console, "log", qjs_console_log, 1);
 	qjs_install_function(ctx, console, "warn", qjs_console_log, 1);
@@ -4602,6 +5184,7 @@ static void qjs_install_globals(JSContext *ctx)
 
 	JS_FreeValue(ctx, global);
 	qjs_install_browser_bootstrap(ctx);
+	qjs_refresh_runtime_shims(ctx);
 	global = JS_GetGlobalObject(ctx);
 	document = JS_GetPropertyStr(ctx, global, "document");
 	qjs_install_function(ctx, document, "createElement",
@@ -4622,6 +5205,8 @@ static void qjs_install_globals(JSContext *ctx)
 			     qjs_document_get_elements_by_tag_name, 1);
 	qjs_install_function(ctx, document, "getElementsByClassName",
 			     qjs_document_get_elements_by_class_name, 1);
+	qjs_install_function(ctx, document, "getElementsByName",
+			     qjs_document_get_elements_by_name, 1);
 	qjs_document_bind_real_nodes(ctx, document);
 	JS_FreeValue(ctx, document);
 	JS_FreeValue(ctx, global);
@@ -4669,6 +5254,166 @@ static void qjs_dump_exception(JSContext *ctx, const char *name)
 	JS_FreeCString(ctx, message);
 	JS_FreeValue(ctx, stack);
 	JS_FreeValue(ctx, exception);
+}
+
+static void qjs_drain_pending_jobs(jsheap *heap, const char *name)
+{
+	JSContext *job_ctx = NULL;
+	unsigned int jobs = 0u;
+
+	if (heap == NULL || heap->runtime == NULL) {
+		return;
+	}
+	while (JS_IsJobPending(heap->runtime) && jobs < LEONOS_QUICKJS_JOB_LIMIT) {
+		int status = JS_ExecutePendingJob(heap->runtime, &job_ctx);
+		if (status < 0) {
+#ifdef LEONOS_USER_APP
+			if (job_ctx == NULL) {
+				leonos_write("NETSURF QUICKJS JOB EXCEPTION missing context\r\n");
+			}
+#endif
+			if (job_ctx != NULL) {
+				qjs_dump_exception(job_ctx,
+						   name != NULL ? name : "pending-job");
+			}
+			break;
+		}
+		if (status == 0) {
+			break;
+		}
+		jobs += 1u;
+	}
+#ifdef LEONOS_USER_APP
+	if (jobs != 0u) {
+		char detail[96];
+		int detail_len = snprintf(detail, sizeof(detail),
+			"NETSURF QUICKJS JOBS drained=%u\r\n",
+			(unsigned int) jobs);
+		if (detail_len > 0) {
+			leonos_write(detail);
+		}
+	}
+	if (jobs >= LEONOS_QUICKJS_JOB_LIMIT && JS_IsJobPending(heap->runtime)) {
+		leonos_write("NETSURF QUICKJS JOBS limit\r\n");
+	}
+#else
+	(void) name;
+#endif
+}
+
+static void qjs_boost_route_timer_budget(JSContext *ctx, const char *name)
+{
+	static const char budget_script[] =
+		"globalThis.__leonosExtraTimerBudget="
+		"Math.max(Number(globalThis.__leonosExtraTimerBudget||0)||0,96);"
+		"globalThis.__leonosTimerDepthLimit="
+		"Math.max(Number(globalThis.__leonosTimerDepthLimit||2)||2,5);"
+		"if(globalThis.__leonosInstallRobloxHttp)globalThis.__leonosInstallRobloxHttp();"
+		"(function(g){function patch(R){if(!R||typeof R.useEffect!=='function'||R.__leonosChartsEffectShim)return;"
+		"var orig=R.useEffect;R.__leonosChartsEffectShim=true;g.__leonosRouteEffectRuns=g.__leonosRouteEffectRuns||0;"
+		"console.log('LEONOS ROUTE SHIM installed');"
+		"R.useEffect=function(fn,deps){try{if(typeof fn==='function'&&g.__leonosRouteEffectRuns<48){"
+		"var id=++g.__leonosRouteEffectRuns;Promise.resolve().then(function(){try{console.log('LEONOS ROUTE EFFECT run '+id);fn();}"
+		"catch(e){try{g._DumpException(e);}catch(x){}}});}}catch(e){}return orig.apply(this,arguments);};}"
+		"if(g.React)patch(g.React);else if(Object.defineProperty&&!g.__leonosReactSetter){g.__leonosReactSetter=true;"
+		"var rv;Object.defineProperty(g,'React',{configurable:true,get:function(){return rv;},set:function(v){rv=v;patch(v);}});}})(globalThis);";
+	JSValue result;
+
+	if (ctx == NULL || name == NULL ||
+	    strstr(name, "js.rbxcdn.com/") == NULL ||
+	    (strstr(name, "GameCarousel.") == NULL &&
+	     strstr(name, "SearchLandingPage.") == NULL)) {
+		return;
+	}
+#ifdef LEONOS_USER_APP
+	leonos_write("NETSURF QUICKJS ROUTE BOOST ");
+	leonos_write(name);
+	leonos_write("\r\n");
+#endif
+	result = JS_Eval(ctx, budget_script, sizeof(budget_script) - 1u,
+			 "leonos-quickjs-route-timer-budget.js",
+			 JS_EVAL_TYPE_GLOBAL);
+	JS_FreeValue(ctx, result);
+}
+
+static bool qjs_inject_gamecarousel_probe(const char *name, char **eval_copy,
+					  size_t *eval_len)
+{
+	static const char marker[] =
+		"}()}(),window.Roblox&&window.Roblox.BundleDetector";
+	static const char probe[] =
+		";try{console.log('LEONOS ROUTE PROBE start');"
+		"var __leonosAppendProbeImg=function(u){try{if(!u)return;"
+		"var bs=document.getElementsByTagName&&document.getElementsByTagName('body'),host=bs&&bs.length?bs[0]:(document.body||document.documentElement);"
+		"var im=document.createElement('img');im.src=u;im.alt='Roblox thumbnail';"
+		"im.width=384;im.height=216;if(im.style){im.style.width='384px';im.style.height='216px';}"
+		"if(im.setAttribute){im.setAttribute('src',u);im.setAttribute('alt','Roblox thumbnail');im.setAttribute('width','384');im.setAttribute('height','216');}"
+		"console.log('LEONOS ROUTE IMG append '+(host&&host.tagName||'?')+' '+u);"
+		"host&&host.appendChild&&host.appendChild(im);}catch(e){console.error(e);}};"
+		"var __leonosFindId=function f(o,d){if(!o||d>7)return null;"
+		"if(Array.isArray(o)){for(var i=0;i<o.length;i++){var a=f(o[i],d+1);if(a)return a;}return null;}"
+		"if(typeof o==='object'){var ks=['rootPlaceId','placeId','assetId'];"
+		"for(var k=0;k<ks.length;k++){var v=o[ks[k]];if((typeof v==='number'&&v>0)||(typeof v==='string'&&v))return v;}"
+		"for(var p in o)if(o.hasOwnProperty(p)){var r=f(o[p],d+1);if(r)return r;}}return null;};"
+		"var __leonosPickSort=function(d){var a=d&&d.sorts;if(!a||!a.length)return 'top-trending';"
+		"for(var i=0;i<a.length;i++)if(a[i]&&a[i].contentType==='Games'&&a[i].sortId)return a[i].sortId;"
+		"return 'top-trending';};"
+		"var __leonosProbeSync=function(){try{if(!globalThis._leonosFetchText||globalThis.__leonosRouteSyncDone)return;"
+		"globalThis.__leonosRouteSyncDone=true;"
+		"var r=globalThis._leonosFetchText('https://apis.roblox.com/explore-api/v1/get-sorts?sessionId=leonos','GET','','','application/json');"
+		"console.log('LEONOS ROUTE SYNC sorts status '+(r&&r.status));"
+		"var d=JSON.parse(String(r&&r.body||'{}')),sort=__leonosPickSort(d);console.log('LEONOS ROUTE PROBE sorts');"
+		"var cu='https://apis.roblox.com/explore-api/v1/get-sort-content?sessionId=leonos&sortId='+encodeURIComponent(sort);"
+		"var cr=globalThis._leonosFetchText(cu,'GET','','','application/json');"
+		"console.log('LEONOS ROUTE SYNC content status '+(cr&&cr.status)+' sort '+sort);"
+		"var cd=JSON.parse(String(cr&&cr.body||'{}')),id=__leonosFindId(cd);console.log('LEONOS ROUTE PROBE id '+id);"
+		"if(id){var tu='https://thumbnails.roblox.com/v1/assets?assetIds='+encodeURIComponent(id)+'&size=768x432&format=Png';"
+		"var tr=globalThis._leonosFetchText(tu,'GET','','','application/json');"
+		"console.log('LEONOS ROUTE SYNC thumbnail status '+(tr&&tr.status));"
+		"var td=JSON.parse(String(tr&&tr.body||'{}')),row=td&&td.data&&td.data[0],u=row&&row.imageUrl;"
+		"console.log('LEONOS ROUTE PROBE imageUrl '+u);__leonosAppendProbeImg(u);}}catch(e){console.error(e);}};"
+		"__leonosProbeSync();"
+		"tm('leonos',null,[],{}).then(function(d){console.log('LEONOS ROUTE PROBE sorts');"
+		"var id=__leonosFindId(d);console.log('LEONOS ROUTE PROBE id '+id);"
+		"if(id)return tf(id).then(function(u){console.log('LEONOS ROUTE PROBE imageUrl '+u);"
+		"__leonosAppendProbeImg(u);return u;});});"
+		"}catch(e){console.error(e);}";
+	char *pos;
+	char *next;
+	size_t prefix;
+	size_t marker_offset;
+	size_t suffix_len;
+	size_t probe_len;
+
+	if (name == NULL || eval_copy == NULL || *eval_copy == NULL ||
+	    eval_len == NULL ||
+	    strstr(name, "js.rbxcdn.com/") == NULL ||
+	    strstr(name, "GameCarousel.") == NULL) {
+		return false;
+	}
+	pos = strstr(*eval_copy, marker);
+	if (pos == NULL) {
+		return false;
+	}
+	prefix = (size_t)(pos - *eval_copy);
+	marker_offset = prefix;
+	suffix_len = *eval_len - marker_offset;
+	probe_len = sizeof(probe) - 1u;
+	next = malloc(*eval_len + probe_len + 1u);
+	if (next == NULL) {
+		return false;
+	}
+	memcpy(next, *eval_copy, prefix);
+	memcpy(next + prefix, probe, probe_len);
+	memcpy(next + prefix + probe_len, *eval_copy + marker_offset, suffix_len);
+	next[*eval_len + probe_len] = 0;
+	free(*eval_copy);
+	*eval_copy = next;
+	*eval_len += probe_len;
+#ifdef LEONOS_USER_APP
+	leonos_write("NETSURF QUICKJS ROUTE PROBE injected\r\n");
+#endif
+	return true;
 }
 
 static void qjs_dump_source_preview(const uint8_t *txt, size_t txtlen,
@@ -4934,6 +5679,9 @@ bool js_exec(jsthread *thread, const uint8_t *txt, size_t txtlen,
 		}
 	}
 #endif
+	if (qjs_inject_gamecarousel_probe(name, &eval_copy, &eval_len)) {
+		eval_text = eval_copy;
+	}
 	if (qjs_should_skip_blocking_script(name, eval_text, eval_len)) {
 #ifdef LEONOS_USER_APP
 		char detail[40];
@@ -4954,10 +5702,13 @@ bool js_exec(jsthread *thread, const uint8_t *txt, size_t txtlen,
 	leonos_write(name != NULL ? name : "?script?");
 	leonos_write("\r\n");
 #endif
+	qjs_refresh_runtime_shims(thread->ctx);
+	qjs_boost_route_timer_budget(thread->ctx, name);
 	qjs_begin_script_interrupt(thread->heap, eval_len, name);
 	thread->active_script_name = name;
 	thread->active_script_dom_appends = 0u;
 	thread->active_script_dom_budget_hit = false;
+	thread->active_script_dom_native_budget_hit = false;
 	thread->active_script_react_landing_attached = false;
 	if (thread->active_script_react_landing_candidate != NULL) {
 		dom_node_unref(thread->active_script_react_landing_candidate);
@@ -4968,11 +5719,16 @@ bool js_exec(jsthread *thread, const uint8_t *txt, size_t txtlen,
 			 JS_EVAL_TYPE_GLOBAL);
 	uint32_t interrupt_limit = thread->heap != NULL ?
 		thread->heap->interrupt_limit : 0u;
+	if (!JS_IsException(result)) {
+		qjs_drain_pending_jobs(thread->heap, name);
+	}
 	bool interrupted = qjs_end_script_interrupt(thread->heap);
 	qjs_attach_react_landing_candidate(thread->ctx);
+	html_leonos_dom_flush_mutations(thread->htmlc);
 	thread->active_script_name = NULL;
 	thread->active_script_dom_appends = 0u;
 	thread->active_script_dom_budget_hit = false;
+	thread->active_script_dom_native_budget_hit = false;
 	thread->active_script_react_landing_attached = false;
 	if (thread->active_script_react_landing_candidate != NULL) {
 		dom_node_unref(thread->active_script_react_landing_candidate);
@@ -5005,10 +5761,28 @@ bool js_exec(jsthread *thread, const uint8_t *txt, size_t txtlen,
 bool js_fire_event(jsthread *thread, const char *type,
 		   struct dom_document *doc, struct dom_node *target)
 {
-	(void) thread;
-	(void) type;
+	JSContext *ctx;
+	JSValue global;
+	JSValue document;
+
 	(void) doc;
 	(void) target;
+	if (thread == NULL || thread->ctx == NULL || type == NULL) {
+		return false;
+	}
+	ctx = thread->ctx;
+	global = JS_GetGlobalObject(ctx);
+	document = JS_GetPropertyStr(ctx, global, "document");
+	if (!JS_IsObject(document)) {
+		JS_FreeValue(ctx, document);
+		JS_FreeValue(ctx, global);
+		return false;
+	}
+	if (strcmp(type, "load") == 0) {
+		qjs_set_string(ctx, document, "readyState", "complete");
+	}
+	JS_FreeValue(ctx, document);
+	JS_FreeValue(ctx, global);
 	return true;
 }
 

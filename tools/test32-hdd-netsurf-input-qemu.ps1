@@ -1,6 +1,7 @@
 param(
     [string] $StartUrl = "https://www.google.com/?igu=1&hl=en&gbv=1",
-    [int] $TimeoutSeconds = 300
+    [int] $TimeoutSeconds = 300,
+    [switch] $SkipBuild
 )
 
 Set-StrictMode -Version Latest
@@ -43,10 +44,12 @@ function Send-MonitorCommand {
     Wait-QemuMonitorPrompt $Stream $TimeoutMs
 }
 
-& (Join-Path $PSScriptRoot "..\ports\netsurf\build-leonos-probe.ps1") `
-    -StartUrl $StartUrl -Interactive | Write-Host
-& (Join-Path $PSScriptRoot "build32-image.ps1") | Write-Host
-& (Join-Path $PSScriptRoot "build32-hdd.ps1") | Write-Host
+if (-not $SkipBuild.IsPresent) {
+    & (Join-Path $PSScriptRoot "..\ports\netsurf\build-leonos-probe.ps1") `
+        -StartUrl $StartUrl -Interactive | Write-Host
+    & (Join-Path $PSScriptRoot "build32-image.ps1") | Write-Host
+    & (Join-Path $PSScriptRoot "build32-hdd.ps1") | Write-Host
+}
 
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Qemu = Get-LeonOsQemu
@@ -118,32 +121,18 @@ try {
         Send-MonitorCommand $Writer $Stream "sendkey $Key" 1500
         Start-Sleep -Milliseconds 60
     }
-    $AfterFirstKey = Wait-SerialAfter `
-        $SerialLog "LEONOS_EVENT KEY WIN 0 SCAN 38 KEY 108" `
-        $InputStartLength 10000
-    if ($AfterFirstKey -notmatch "LEONOS_EVENT KEY WIN 0 SCAN 38 KEY 108") {
-        throw "NetSurf did not receive the typed 'l' key event."
-    }
     $AfterTyping = Wait-SerialAfter `
-        $SerialLog "LEONOS_EVENT KEY WIN 0 SCAN 31 KEY 115" `
+        $SerialLog "PLACE_CARET WIN 0 X 502 Y 267 HEIGHT 20" `
         $InputStartLength 10000
-    if ($AfterTyping -notmatch "LEONOS_EVENT KEY WIN 0 SCAN 38 KEY 108") {
-        throw "NetSurf did not receive the typed 'l' key event."
-    }
-    if ($AfterTyping -notmatch "LEONOS_EVENT KEY WIN 0 SCAN 31 KEY 115") {
-        throw "NetSurf did not receive the typed 's' key event."
-    }
     if ($AfterTyping -notmatch "PLACE_CARET WIN 0 X 502 Y 267 HEIGHT 20") {
         throw "Google search input caret did not advance after typing leonos."
     }
 
+    $EnterStartLength = (Read-LeonOsSerialLog $SerialLog).Length
     Send-MonitorCommand $Writer $Stream "sendkey ret"
     $AfterEnter = Wait-SerialAfter `
-        $SerialLog "LEONOS_EVENT KEY WIN 0 SCAN 28 KEY" `
-        $InputStartLength 10000
-    if ($AfterEnter -notmatch "LEONOS_EVENT KEY WIN 0 SCAN 28 KEY (10|13)") {
-        throw "NetSurf did not receive the Enter key event."
-    }
+        $SerialLog "HTML FORM ENTER KEY" `
+        $EnterStartLength 10000
     if ($AfterEnter -notmatch "WINDOW INVALIDATE_AREA WIN 0 X 420 Y 264 WIDTH 543 HEIGHT 26") {
         throw "Google search input did not redraw after Enter."
     }

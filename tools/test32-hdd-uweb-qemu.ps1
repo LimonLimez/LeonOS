@@ -73,8 +73,11 @@ $Text = $Output.ToString()
 $Needles = @(
     "UWEB user HTTPS fetch",
     "LeonOS user net fetch begin",
+    "LeonOS user net fetch ex begin POST https://postman-echo.com/post",
+    "LeonOS net HTTPS request sent POST",
     "LeonOS user net fetch done",
     "fetched ",
+    "post fetched ",
     "LeonOS user browser open queued",
     "LeonOS net HTTPS status"
 )

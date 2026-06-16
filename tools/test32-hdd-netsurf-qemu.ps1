@@ -8,13 +8,27 @@ param(
     [switch] $AllowTextOnlyPaint,
     [switch] $AllowDomTextFallback,
     [switch] $LiveSerial,
-    [switch] $SkipBuild
+    [switch] $SkipBuild,
+    [switch] $FailOnQuickJsException,
+    [int] $HoldAfterPassSeconds = 0,
+    [string[]] $WaitForSerial = @()
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "qemu-common.ps1")
+
+$NormalizedWaitForSerial = @()
+foreach ($ExpectedSerial in $WaitForSerial) {
+    foreach ($Part in ([string] $ExpectedSerial -split ",")) {
+        $Trimmed = $Part.Trim()
+        if ($Trimmed.Length -gt 0) {
+            $NormalizedWaitForSerial += $Trimmed
+        }
+    }
+}
+$WaitForSerial = $NormalizedWaitForSerial
 
 # Build the real NetSurf-port smoke app, place it on the FAT32 HDD image, boot
 # LeonOS, then press 'm' to launch NETSURF.LEO from ring 3.
@@ -110,6 +124,7 @@ try {
     $SawReadableFallback = $false
     $SawDynamicDomText = $false
     $SawDomReflow = $false
+    $PassSatisfiedAt = $null
     $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $Deadline -and -not $Process.HasExited) {
         $Text = Read-LeonOsSerialLog $SerialLog
@@ -147,14 +162,30 @@ try {
             $Text.Contains("HTML LEONOS DOM MUTATION REFLOW")) {
             $SawDomReflow = $true
         }
+        $SawWaitSerial = $true
+        foreach ($ExpectedSerial in $WaitForSerial) {
+            if ($Text -notlike "*$ExpectedSerial*") {
+                $SawWaitSerial = $false
+                break
+            }
+        }
         $SawRequiredPaint = $SawBitmapPlot -or
             ($AllowTextOnlyPaint -and $SawTextPlot) -or
             ($AllowDomTextFallback -and $SawReadableFallback -and $SawDynamicDomText)
         $SawRequiredImage = $SawImageDecoded -or $AllowTextOnlyPaint -or $AllowDomTextFallback
         $SawRequiredReflow = $SawDomReflow -or $AllowNoDomReflow
         if ($SawFetchBytes -and $SawFetchFinished -and $SawRedrawAfterFetch -and
-            $SawRequiredImage -and $SawRequiredPaint -and $SawRequiredReflow) {
-            break
+            $SawRequiredImage -and $SawRequiredPaint -and $SawRequiredReflow -and
+            $SawWaitSerial) {
+            if ($null -eq $PassSatisfiedAt) {
+                $PassSatisfiedAt = [DateTime]::UtcNow
+            }
+            if ($HoldAfterPassSeconds -le 0 -or
+                [DateTime]::UtcNow -ge $PassSatisfiedAt.AddSeconds($HoldAfterPassSeconds)) {
+                break
+            }
+        } else {
+            $PassSatisfiedAt = $null
         }
         Start-Sleep -Milliseconds 100
     }
@@ -259,6 +290,18 @@ try {
             "NETSURF LEO HTTPS fetch setup ")).Count
         if ($FetchSetupCount -lt 2) {
             throw "NetSurf did not start a real subresource fetch for $StartUrl."
+        }
+    }
+    if ($FailOnQuickJsException -and
+        $Stdout -like "*NETSURF QUICKJS EXCEPTION*") {
+        $ExceptionLines = ($Stdout -split "`r?`n") |
+            Where-Object { $_ -like "*NETSURF QUICKJS EXCEPTION*" } |
+            Select-Object -First 5
+        throw "QuickJS emitted exception(s): $($ExceptionLines -join ' | ')"
+    }
+    foreach ($ExpectedSerial in $WaitForSerial) {
+        if ($Stdout -notlike "*$ExpectedSerial*") {
+            throw "QEMU did not emit requested serial line: $ExpectedSerial"
         }
     }
 } finally {

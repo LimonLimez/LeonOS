@@ -189,15 +189,20 @@ extern u8 __kernel_end;
 #define SYS_NET_STREAM_CLOSE 17u
 #define SYS_FB_TEXT 18u
 #define SYS_FB_BLIT 19u
+#define SYS_NET_FETCH_EX 20u
 #define USER_BROWSER_URL_MAX 4096u
 #define USER_NET_FETCH_MAX (8u * 1024u * 1024u)
 #define USER_NET_FETCH_META_SIZE 588u
+#define USER_NET_FETCH_REQUEST_SIZE 32u
 #define USER_NET_FETCH_CONTENT_TYPE_MAX 64u
 #define USER_NET_FETCH_LOCATION_MAX 512u
 #define USER_NET_FETCH_FLAG_HEADERS 0x00000001u
 #define USER_NET_FETCH_FLAG_CHUNKED 0x00000002u
 #define USER_NET_FETCH_FLAG_GZIP 0x00000004u
 #define USER_NET_FETCH_FLAG_TRUNCATED 0x00000008u
+#define USER_NET_REQUEST_METHOD_MAX 8u
+#define USER_NET_REQUEST_HEADER_VALUE_MAX 128u
+#define USER_NET_REQUEST_BODY_MAX (64u * 1024u)
 #define USER_NET_STREAM_HANDLE 1u
 #define USER_NET_STREAM_STATE_OPEN 0x00000001u
 #define USER_NET_STREAM_STATE_ACTIVE 0x00000002u
@@ -262,6 +267,11 @@ static u32 net_user_fetch_flags;
 static char net_user_fetch_content_type[USER_NET_FETCH_CONTENT_TYPE_MAX];
 static char net_user_fetch_location[USER_NET_FETCH_LOCATION_MAX];
 static u8 net_user_fetch_buf[USER_NET_FETCH_MAX];
+static char net_user_request_method[USER_NET_REQUEST_METHOD_MAX];
+static char net_user_request_content_type[USER_NET_REQUEST_HEADER_VALUE_MAX];
+static char net_user_request_accept[USER_NET_REQUEST_HEADER_VALUE_MAX];
+static u8 net_user_request_body[USER_NET_REQUEST_BODY_MAX];
+static u32 net_user_request_body_len;
 static u8 net_user_stream_open;
 static u32 net_user_stream_read_pos;
 static u32 net_user_stream_start_tick;
@@ -907,12 +917,20 @@ static u32 align_up(u32 value, u32 align)
     return (value + align - 1u) & ~(align - 1u);
 }
 
+static u8 event_queue_contains_type(u32 type);
+
 static void event_push(u32 type, u32 data0, u32 data1)
 {
     u32 next = (event_head + 1u) % EVENT_QUEUE_CAPACITY;
+    if (type == EVENT_TIMER && event_queue_contains_type(EVENT_TIMER)) {
+        return;
+    }
     if (next == event_tail) {
         event_dropped += 1;
-        return;
+        if (type != EVENT_KEYBOARD && type != EVENT_MOUSE_BUTTON) {
+            return;
+        }
+        event_tail = (event_tail + 1u) % EVENT_QUEUE_CAPACITY;
     }
     event_queue[event_head].type = type;
     event_queue[event_head].data0 = data0;
@@ -931,6 +949,23 @@ static u8 event_pop(struct KernelEvent *out)
     out->data1 = event_queue[event_tail].data1;
     event_tail = (event_tail + 1u) % EVENT_QUEUE_CAPACITY;
     return 1;
+}
+
+static u8 event_queue_contains_type(u32 type)
+{
+    u32 index = event_tail;
+    while (index != event_head) {
+        if (event_queue[index].type == type) {
+            return 1u;
+        }
+        index = (index + 1u) % EVENT_QUEUE_CAPACITY;
+    }
+    return 0u;
+}
+
+static void event_clear(void)
+{
+    event_tail = event_head;
 }
 
 static void pmm_set_free(u32 page_index, u8 free)
@@ -2920,6 +2955,18 @@ static void net_browser_open_url_internal(const char *url, u8 add_history,
                                           u8 restore_scroll);
 static void net_browser_retry_current_url_after_https_stall(const char *reason);
 static void net_user_fetch_finish(u8 ok);
+static u32 net_append_capped(char *dst, u32 pos, u32 dst_len, const char *src);
+
+static void net_user_request_reset(void)
+{
+    net_user_request_method[0] = 'G';
+    net_user_request_method[1] = 'E';
+    net_user_request_method[2] = 'T';
+    net_user_request_method[3] = 0;
+    net_user_request_content_type[0] = 0;
+    net_user_request_accept[0] = 0;
+    net_user_request_body_len = 0u;
+}
 
 static void net_user_fetch_reset(void)
 {
@@ -2935,6 +2982,7 @@ static void net_user_fetch_reset(void)
     net_user_fetch_content_type[0] = 0;
     net_user_fetch_location[0] = 0;
     net_user_stream_busy_log_count = 0u;
+    net_user_request_reset();
 }
 
 static void net_user_fetch_note_body(const u8 *data, u32 len)
@@ -2977,8 +3025,32 @@ static void net_user_fetch_begin(const char *url)
     net_browser_open_url_internal(url, 0u, 0u);
 }
 
+static void net_user_fetch_begin_request(const char *url, const char *method,
+                                         const u8 *body, u32 body_len,
+                                         const char *content_type,
+                                         const char *accept)
+{
+    net_user_fetch_reset();
+    net_append_capped(net_user_request_method, 0u,
+                      sizeof(net_user_request_method), method);
+    net_append_capped(net_user_request_content_type, 0u,
+                      sizeof(net_user_request_content_type), content_type);
+    net_append_capped(net_user_request_accept, 0u,
+                      sizeof(net_user_request_accept), accept);
+    if (body != 0 && body_len != 0u) {
+        if (body_len > USER_NET_REQUEST_BODY_MAX) {
+            body_len = USER_NET_REQUEST_BODY_MAX;
+        }
+        mem_copy(net_user_request_body, body, body_len);
+        net_user_request_body_len = body_len;
+    }
+    net_user_fetch_active = 1u;
+    net_browser_open_url_internal(url, 0u, 0u);
+}
+
 static void net_user_fetch_drive(void);
 static u32 user_syscall_net_fetch(u32 url_ptr, u32 buf_ptr, u32 max_len);
+static u32 user_syscall_net_fetch_ex(u32 request_ptr);
 static u32 user_syscall_net_fetch_meta(u32 meta_ptr);
 static u32 user_syscall_net_stream_open(u32 url_ptr);
 static u32 user_syscall_net_stream_poll(u32 handle);
@@ -3069,6 +3141,10 @@ void syscall_dispatch(const struct InterruptFrame *frame)
     }
     if (number == SYS_FB_BLIT) {
         ret->eax = user_syscall_fb_blit(frame->ebx);
+        return;
+    }
+    if (number == SYS_NET_FETCH_EX) {
+        ret->eax = user_syscall_net_fetch_ex(frame->ebx);
         return;
     }
     if (number == SYS_EXIT) {
@@ -3257,6 +3333,8 @@ static void leo_run_user_app(const char raw_name[11], const char *display_name)
     user_heap_limit = user_heap_base + heap_pages * PAGE_SIZE;
     user_heap_next = user_heap_base;
     user_heap_first = 0u;
+    event_clear();
+    user_event_poll_reported = 0u;
     user_app_running = 1;
 
     u32 entry_addr = USER_VIRT_BASE + entry_offset;
@@ -5116,6 +5194,7 @@ static void net_tls_send_encrypted_finished(void)
 }
 
 static u32 net_append_capped(char *dst, u32 pos, u32 dst_len, const char *src);
+static u32 net_append_u32_capped(char *dst, u32 pos, u32 dst_len, u32 value);
 static u32 net_cookie_append_request_header(char *dst, u32 pos, u32 dst_len);
 
 static u8 net_tls_send_application_data(const u8 *plain, u32 plain_len)
@@ -5173,6 +5252,9 @@ static void net_tls_send_https_get(void)
 {
     char *request = net_https_request_buf;
     const char *path = net_browser_path;
+    const char *method = "GET";
+    u8 user_primary_fetch = net_user_fetch_active && net_tls_fetch_kind == 0u;
+    u32 request_body_len = 0u;
     if (net_tls_fetch_kind == 1u) {
         path = net_browser_first_same_host_resource_path();
         if (path == 0) {
@@ -5182,8 +5264,18 @@ static void net_tls_send_https_get(void)
     if (path == 0 || path[0] == 0) {
         path = "/";
     }
+    if (user_primary_fetch && net_user_request_method[0] != 0) {
+        method = net_user_request_method;
+        request_body_len = net_user_request_body_len;
+    }
+    u8 method_is_get = method[0] == 'G' && method[1] == 'E' &&
+                       method[2] == 'T' && method[3] == 0;
+    u8 method_is_head = method[0] == 'H' && method[1] == 'E' &&
+                        method[2] == 'A' && method[3] == 'D' &&
+                        method[4] == 0;
     u32 len = 0u;
-    len = net_append_capped(request, len, NET_HTTPS_REQUEST_MAX, "GET ");
+    len = net_append_capped(request, len, NET_HTTPS_REQUEST_MAX, method);
+    len = net_append_capped(request, len, NET_HTTPS_REQUEST_MAX, " ");
     len = net_append_capped(request, len, NET_HTTPS_REQUEST_MAX, path);
     len = net_append_capped(request, len, NET_HTTPS_REQUEST_MAX,
         " HTTP/1.1\r\n"
@@ -5196,7 +5288,10 @@ static void net_tls_send_https_get(void)
         "Accept: ");
     u8 rslot = net_tls_fetch_kind == 1u ? net_browser_first_same_host_resource_slot()
                                         : 0xFFu;
-    if (net_user_fetch_active &&
+    if (user_primary_fetch && net_user_request_accept[0] != 0) {
+        len = net_append_capped(request, len, NET_HTTPS_REQUEST_MAX,
+            net_user_request_accept);
+    } else if (net_user_fetch_active &&
         (net_text_contains_ci(path, ".css") ||
          net_text_contains_ci(path, "/_/ss/") ||
          net_text_contains_ci(path, "/css"))) {
@@ -5220,6 +5315,18 @@ static void net_tls_send_https_get(void)
         len = net_append_capped(request, len, NET_HTTPS_REQUEST_MAX,
             "text/html,application/xhtml+xml");
     }
+    if (user_primary_fetch &&
+        (request_body_len != 0u || (!method_is_get && !method_is_head))) {
+        len = net_append_capped(request, len, NET_HTTPS_REQUEST_MAX,
+            "\r\nContent-Type: ");
+        len = net_append_capped(request, len, NET_HTTPS_REQUEST_MAX,
+            net_user_request_content_type[0] != 0 ?
+            net_user_request_content_type : "application/octet-stream");
+        len = net_append_capped(request, len, NET_HTTPS_REQUEST_MAX,
+            "\r\nContent-Length: ");
+        len = net_append_u32_capped(request, len, NET_HTTPS_REQUEST_MAX,
+                                   request_body_len);
+    }
     len = net_append_capped(request, len, NET_HTTPS_REQUEST_MAX,
         "\r\n"
         "Accept-Encoding: identity\r\n"
@@ -5231,7 +5338,12 @@ static void net_tls_send_https_get(void)
         serial_print("LeonOS net HTTPS GET request too long\r\n");
         return;
     }
-    if (net_tls_send_application_data((const u8 *) request, len)) {
+    u8 sent = net_tls_send_application_data((const u8 *) request, len);
+    if (sent && request_body_len != 0u) {
+        sent = net_tls_send_application_data(net_user_request_body,
+                                             request_body_len);
+    }
+    if (sent) {
         net_https_get_sent = 1u;
         net_https_get_tick = system_ticks;
         if (net_tls_fetch_kind == 1u) {
@@ -5242,7 +5354,15 @@ static void net_tls_send_https_get(void)
             serial_print("\r\n");
         } else {
             net_set_last("HTTPS GET SENT");
-            serial_print_line(msg_net_https_get);
+            if (method_is_get && request_body_len == 0u) {
+                serial_print_line(msg_net_https_get);
+            } else {
+                serial_print("LeonOS net HTTPS request sent ");
+                serial_print(method);
+                serial_print(" body ");
+                serial_print_dec(request_body_len);
+                serial_print("\r\n");
+            }
         }
     }
 }
@@ -5920,6 +6040,11 @@ static u8 net_user_fetch_allows_empty_body(void)
         net_user_fetch_status_code == 304u) {
         return 1u;
     }
+    if (net_user_fetch_status_code >= 300u &&
+        net_user_fetch_status_code < 400u &&
+        net_user_fetch_location[0] != 0) {
+        return 1u;
+    }
     if (net_user_fetch_content_length_seen &&
         net_user_fetch_content_length == 0u) {
         return 1u;
@@ -5995,6 +6120,14 @@ static void net_browser_finalize_primary_response(const char *reason)
 {
     if (net_user_fetch_active) {
         if (net_user_fetch_retry_empty_response(reason)) {
+            return;
+        }
+        if (net_user_fetch_status_code == 0u &&
+            net_user_fetch_len == 0u &&
+            (net_user_fetch_flags & USER_NET_FETCH_FLAG_HEADERS) == 0u &&
+            net_browser_header_only_retry_count <
+                    NET_BROWSER_HEADER_ONLY_RETRY_MAX) {
+            net_browser_retry_current_url_after_https_stall("headerless-fin");
             return;
         }
         u8 ok = (net_user_fetch_status_code != 0u &&
@@ -8276,6 +8409,26 @@ static u32 net_append_capped(char *dst, u32 pos, u32 dst_len, const char *src)
         dst[pos++] = src[i];
     }
     dst[pos] = 0;
+    return pos;
+}
+
+static u32 net_append_u32_capped(char *dst, u32 pos, u32 dst_len, u32 value)
+{
+    char tmp[10];
+    u32 n = 0u;
+    if (value == 0u) {
+        return net_append_capped(dst, pos, dst_len, "0");
+    }
+    while (value != 0u && n < sizeof(tmp)) {
+        tmp[n++] = (char) ('0' + (value % 10u));
+        value /= 10u;
+    }
+    while (n != 0u && pos + 1u < dst_len) {
+        dst[pos++] = tmp[--n];
+    }
+    if (dst_len != 0u) {
+        dst[pos] = 0;
+    }
     return pos;
 }
 
@@ -12495,6 +12648,116 @@ static u8 user_copy_https_url(u32 url_ptr, char *url_copy, u32 url_copy_max)
     return 1u;
 }
 
+static u8 user_copy_method_token(u32 method_ptr, char *dst, u32 dst_len)
+{
+    if (dst_len < 4u) {
+        return 0u;
+    }
+    if (method_ptr == 0u) {
+        dst[0] = 'G';
+        dst[1] = 'E';
+        dst[2] = 'T';
+        dst[3] = 0;
+        return 1u;
+    }
+    if (!user_range_valid(method_ptr, 1u)) {
+        return 0u;
+    }
+    const char *src = (const char *) method_ptr;
+    u32 max = user_range_max(method_ptr);
+    u32 i = 0u;
+    while (i + 1u < dst_len && i < max && src[i] != 0) {
+        char ch = src[i];
+        if (ch >= 'a' && ch <= 'z') {
+            ch = (char) (ch - ('a' - 'A'));
+        }
+        if (ch < 'A' || ch > 'Z') {
+            return 0u;
+        }
+        dst[i++] = ch;
+    }
+    if (i == 0u) {
+        dst[0] = 'G';
+        dst[1] = 'E';
+        dst[2] = 'T';
+        dst[3] = 0;
+        return 1u;
+    }
+    if (i >= max || (i + 1u >= dst_len && src[i] != 0)) {
+        return 0u;
+    }
+    dst[i] = 0;
+    return 1u;
+}
+
+static u8 user_copy_header_value(u32 value_ptr, char *dst, u32 dst_len)
+{
+    if (dst_len == 0u) {
+        return 0u;
+    }
+    dst[0] = 0;
+    if (value_ptr == 0u) {
+        return 1u;
+    }
+    if (!user_range_valid(value_ptr, 1u)) {
+        return 0u;
+    }
+    const char *src = (const char *) value_ptr;
+    u32 max = user_range_max(value_ptr);
+    u32 i = 0u;
+    while (i + 1u < dst_len && i < max && src[i] != 0) {
+        char ch = src[i];
+        if (ch == '\r' || ch == '\n') {
+            return 0u;
+        }
+        if ((u8) ch < 32u || (u8) ch > 126u) {
+            ch = ' ';
+        }
+        dst[i++] = ch;
+    }
+    dst[i] = 0;
+    return 1u;
+}
+
+static u32 user_syscall_net_fetch_wait_copy(u32 buf_ptr, u32 max_len)
+{
+    u32 deadline = system_ticks + USER_NET_FETCH_TICK_LIMIT;
+    while (!net_user_fetch_done && system_ticks < deadline) {
+        net_user_fetch_drive();
+    }
+
+    if (!net_user_fetch_done) {
+        net_tls_abort_current_for_navigation();
+        net_user_fetch_finish(0u);
+    }
+
+    if (!net_user_fetch_ok || net_user_fetch_len == 0u) {
+        return 0u;
+    }
+
+    u32 copy = net_user_fetch_len;
+    if (copy > max_len) {
+        copy = max_len;
+    }
+    if (!user_range_valid(buf_ptr, copy)) {
+        serial_print("LeonOS user net fetch copy bad range bytes ");
+        serial_print_dec(copy);
+        serial_print("\r\n");
+        return 0u;
+    }
+    serial_print("LeonOS user net fetch copy begin bytes ");
+    serial_print_dec(copy);
+    serial_print("\r\n");
+    u8 *dst = (u8 *) buf_ptr;
+    for (u32 i = 0u; i < copy; i += 1u) {
+        dst[i] = net_user_fetch_buf[i];
+    }
+    serial_print("LeonOS user net fetch copy return bytes ");
+    serial_print_dec(copy);
+    serial_print("\r\n");
+    return copy;
+}
+
 static u32 net_user_stream_state(void)
 {
     u32 state = 0u;
@@ -12551,41 +12814,70 @@ static u32 user_syscall_net_fetch(u32 url_ptr, u32 buf_ptr, u32 max_len)
     serial_print("\r\n");
     net_user_fetch_begin(user_url_copy);
 
-    u32 deadline = system_ticks + USER_NET_FETCH_TICK_LIMIT;
-    while (!net_user_fetch_done && system_ticks < deadline) {
-        net_user_fetch_drive();
-    }
+    return user_syscall_net_fetch_wait_copy(buf_ptr, max_len);
+}
 
-    if (!net_user_fetch_done) {
-        net_tls_abort_current_for_navigation();
-        net_user_fetch_finish(0u);
-    }
-
-    if (!net_user_fetch_ok || net_user_fetch_len == 0u) {
+static u32 user_syscall_net_fetch_ex(u32 request_ptr)
+{
+    if (!user_range_valid(request_ptr, USER_NET_FETCH_REQUEST_SIZE)) {
+        serial_print("LeonOS user net fetch ex bad request\r\n");
         return 0u;
     }
+    const u8 *request = (const u8 *) request_ptr;
+    u32 url_ptr = read32(request + 0u);
+    u32 buf_ptr = read32(request + 4u);
+    u32 max_len = read32(request + 8u);
+    u32 method_ptr = read32(request + 12u);
+    u32 body_ptr = read32(request + 16u);
+    u32 body_len = read32(request + 20u);
+    u32 content_type_ptr = read32(request + 24u);
+    u32 accept_ptr = read32(request + 28u);
+    char method[USER_NET_REQUEST_METHOD_MAX];
+    char content_type[USER_NET_REQUEST_HEADER_VALUE_MAX];
+    char accept[USER_NET_REQUEST_HEADER_VALUE_MAX];
 
-    u32 copy = net_user_fetch_len;
-    if (copy > max_len) {
-        copy = max_len;
+    if (!user_range_valid(buf_ptr, 1u) || max_len == 0u) {
+        serial_print("LeonOS user net fetch ex bad buffer\r\n");
+        return 0u;
     }
-    if (!user_range_valid(buf_ptr, copy)) {
-        serial_print("LeonOS user net fetch copy bad range bytes ");
-        serial_print_dec(copy);
+    if (net_user_stream_open) {
+        serial_print("LeonOS user net fetch ex busy stream\r\n");
+        return 0u;
+    }
+    if (!user_copy_https_url(url_ptr, user_url_copy, USER_BROWSER_URL_MAX)) {
+        serial_print("LeonOS user net fetch ex bad url\r\n");
+        return 0u;
+    }
+    if (!user_copy_method_token(method_ptr, method, sizeof(method)) ||
+        !user_copy_header_value(content_type_ptr, content_type,
+                                sizeof(content_type)) ||
+        !user_copy_header_value(accept_ptr, accept, sizeof(accept))) {
+        serial_print("LeonOS user net fetch ex bad request strings\r\n");
+        return 0u;
+    }
+    if (body_len > USER_NET_REQUEST_BODY_MAX) {
+        serial_print("LeonOS user net fetch ex body too large bytes ");
+        serial_print_dec(body_len);
         serial_print("\r\n");
         return 0u;
     }
-    serial_print("LeonOS user net fetch copy begin bytes ");
-    serial_print_dec(copy);
-    serial_print("\r\n");
-    u8 *dst = (u8 *) buf_ptr;
-    for (u32 i = 0u; i < copy; i += 1u) {
-        dst[i] = net_user_fetch_buf[i];
+    if (body_len != 0u && !user_range_valid(body_ptr, body_len)) {
+        serial_print("LeonOS user net fetch ex bad body\r\n");
+        return 0u;
     }
-    serial_print("LeonOS user net fetch copy return bytes ");
-    serial_print_dec(copy);
+
+    serial_print("LeonOS user net fetch ex begin ");
+    serial_print(method);
+    serial_write(' ');
+    serial_print(user_url_copy);
+    serial_print(" body ");
+    serial_print_dec(body_len);
     serial_print("\r\n");
-    return copy;
+
+    net_user_fetch_begin_request(user_url_copy, method,
+                                 body_len != 0u ? (const u8 *) body_ptr : 0,
+                                 body_len, content_type, accept);
+    return user_syscall_net_fetch_wait_copy(buf_ptr, max_len);
 }
 
 static u32 user_syscall_net_fetch_meta(u32 meta_ptr)
