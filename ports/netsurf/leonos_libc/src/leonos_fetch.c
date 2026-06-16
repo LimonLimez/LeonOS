@@ -33,6 +33,18 @@ unsigned int leonos_netsurf_fetch_generation_for_script;
 #define LEONOS_FETCH_JS_SOFT_LIMIT 0u
 #define LEONOS_FETCH_ROBLOX_SCRIPT_BUDGET 28u
 
+static const uint8_t leonos_fetch_transparent_png[] = {
+    0x89u, 0x50u, 0x4eu, 0x47u, 0x0du, 0x0au, 0x1au, 0x0au,
+    0x00u, 0x00u, 0x00u, 0x0du, 0x49u, 0x48u, 0x44u, 0x52u,
+    0x00u, 0x00u, 0x00u, 0x01u, 0x00u, 0x00u, 0x00u, 0x01u,
+    0x08u, 0x04u, 0x00u, 0x00u, 0x00u, 0xb5u, 0x1cu, 0x0cu,
+    0x02u, 0x00u, 0x00u, 0x00u, 0x0bu, 0x49u, 0x44u, 0x41u,
+    0x54u, 0x78u, 0xdau, 0x63u, 0xfcu, 0xffu, 0x1fu, 0x00u,
+    0x03u, 0x03u, 0x02u, 0x00u, 0xefu, 0xbfu, 0xa7u, 0xdbu,
+    0x00u, 0x00u, 0x00u, 0x00u, 0x49u, 0x45u, 0x4eu, 0x44u,
+    0xaeu, 0x42u, 0x60u, 0x82u
+};
+
 struct leonos_fetch_context {
     struct fetch *parent_fetch;
     nsurl *url;
@@ -313,7 +325,11 @@ static bool leonos_fetch_can_fetch(const nsurl *url)
 
 static const char *leonos_fetch_mime_from_url(const char *url)
 {
-    size_t len = strlen(url);
+    size_t len;
+    if (url == NULL) {
+        return "text/html; charset=utf-8";
+    }
+    len = strlen(url);
     for (size_t i = 0u; i < len; i += 1u) {
         if (url[i] == '?' || url[i] == '#') {
             len = i;
@@ -349,8 +365,57 @@ static const char *leonos_fetch_mime_from_url(const char *url)
     if (len >= 5 && strncmp(url + len - 5, ".webp", 5) == 0) {
         return "image/webp";
     }
+    if (strstr(url, "/Png/") != NULL || strstr(url, "/PNG/") != NULL ||
+        strstr(url, "format=Png") != NULL || strstr(url, "format=png") != NULL ||
+        strstr(url, "imageFormat=Png") != NULL ||
+        strstr(url, "imageFormat=png") != NULL) {
+        return "image/png";
+    }
+    if (strstr(url, "/Jpeg/") != NULL || strstr(url, "/JPEG/") != NULL ||
+        strstr(url, "/Jpg/") != NULL || strstr(url, "/JPG/") != NULL ||
+        strstr(url, "format=Jpeg") != NULL ||
+        strstr(url, "format=jpeg") != NULL ||
+        strstr(url, "imageFormat=Jpeg") != NULL ||
+        strstr(url, "imageFormat=jpeg") != NULL) {
+        return "image/jpeg";
+    }
 
     return "text/html; charset=utf-8";
+}
+
+static bool leonos_fetch_url_names_decodable_image(const char *url)
+{
+    size_t len;
+    if (url == NULL) {
+        return false;
+    }
+    len = strlen(url);
+    for (size_t i = 0u; i < len; i += 1u) {
+        if (url[i] == '?' || url[i] == '#') {
+            len = i;
+            break;
+        }
+    }
+
+    return (len >= 4u && strncmp(url + len - 4u, ".ico", 4) == 0) ||
+           (len >= 4u && strncmp(url + len - 4u, ".png", 4) == 0) ||
+           (len >= 4u && strncmp(url + len - 4u, ".jpg", 4) == 0) ||
+           (len >= 5u && strncmp(url + len - 5u, ".jpeg", 5) == 0) ||
+           (len >= 4u && strncmp(url + len - 4u, ".svg", 4) == 0) ||
+           strstr(url, "/Png/") != NULL ||
+           strstr(url, "/PNG/") != NULL ||
+           strstr(url, "/Jpeg/") != NULL ||
+           strstr(url, "/JPEG/") != NULL ||
+           strstr(url, "/Jpg/") != NULL ||
+           strstr(url, "/JPG/") != NULL ||
+           strstr(url, "format=Png") != NULL ||
+           strstr(url, "format=png") != NULL ||
+           strstr(url, "format=Jpeg") != NULL ||
+           strstr(url, "format=jpeg") != NULL ||
+           strstr(url, "imageFormat=Png") != NULL ||
+           strstr(url, "imageFormat=png") != NULL ||
+           strstr(url, "imageFormat=Jpeg") != NULL ||
+           strstr(url, "imageFormat=jpeg") != NULL;
 }
 
 static bool leonos_fetch_url_looks_css(const char *url)
@@ -390,6 +455,14 @@ static bool leonos_fetch_url_looks_js(const char *url)
            strstr(url, "javascript") != NULL;
 }
 
+static bool leonos_fetch_url_is_deferred_tracker(const char *url)
+{
+    return url != NULL &&
+           (strstr(url, "googletagmanager.com/gtag/js") != NULL ||
+            strstr(url, "google-analytics.com/") != NULL ||
+            strstr(url, "analytics.google.com/") != NULL);
+}
+
 static bool leonos_fetch_url_is_roblox_deferred_bundle(const char *url)
 {
     if (url == NULL || strstr(url, "rbxcdn.com/") == NULL) {
@@ -400,11 +473,8 @@ static bool leonos_fetch_url_is_roblox_deferred_bundle(const char *url)
            strstr(url, "UserProfiles.") != NULL ||
            strstr(url, "Navigation.") != NULL ||
            strstr(url, "Sentry.") != NULL ||
-           strstr(url, "SearchLandingPage.") != NULL ||
-           strstr(url, "AngularJsUtilities.") != NULL ||
            strstr(url, "3756ad214dde52cb58a1300177547475") != NULL ||
            strstr(url, "f85ce090699c1c3962762b8a2f8b252f0f2a7d0424c146f41d6c5abbf0147a57") != NULL ||
-           strstr(url, "Thumbnails.") != NULL ||
            strstr(url, "PresenceStatus.") != NULL ||
            strstr(url, "RealTime.") != NULL ||
            strstr(url, "AccountSwitcher.") != NULL ||
@@ -430,6 +500,7 @@ static bool leonos_fetch_url_is_roblox_deferred_style(const char *url)
     }
     if (strstr(url, "FoundationCss.") != NULL ||
         strstr(url, "ReactStyleGuide.") != NULL ||
+        strstr(url, "Thumbnails.") != NULL ||
         strstr(url, "SearchLandingPage.") != NULL ||
         strstr(url, "ReactLanding.") != NULL) {
         return false;
@@ -476,6 +547,9 @@ static bool leonos_fetch_url_is_roblox_landing_script(const char *url)
            strstr(url, "63b59480fef503ff6648900d1051bae7531757a38ce24f77587552fca279d16c") != NULL ||
            strstr(url, "ReactUtilities.") != NULL ||
            strstr(url, "ReactStyleGuide.") != NULL ||
+           strstr(url, "AngularJsUtilities.") != NULL ||
+           strstr(url, "Thumbnails.") != NULL ||
+           strstr(url, "GameCarousel.") != NULL ||
            strstr(url, "SearchLandingPage.") != NULL ||
            strstr(url, "ReactLanding.") != NULL;
 }
@@ -559,7 +633,8 @@ static bool leonos_fetch_url_is_roblox_landing_route_script(const char *url)
         return false;
     }
 
-    return strstr(url, "SearchLandingPage.") != NULL ||
+    return strstr(url, "GameCarousel.") != NULL ||
+           strstr(url, "SearchLandingPage.") != NULL ||
            strstr(url, "ReactLanding.") != NULL;
 }
 
@@ -568,6 +643,20 @@ static bool leonos_fetch_url_is_roblox_react_landing_route_script(const char *ur
     return url != NULL &&
            strstr(url, "js.rbxcdn.com/") != NULL &&
            strstr(url, "ReactLanding.") != NULL;
+}
+
+static bool leonos_fetch_url_is_roblox_thumbnails_script(const char *url)
+{
+    return url != NULL &&
+           strstr(url, "js.rbxcdn.com/") != NULL &&
+           strstr(url, "Thumbnails.") != NULL;
+}
+
+static bool leonos_fetch_url_is_roblox_game_carousel_script(const char *url)
+{
+    return url != NULL &&
+           strstr(url, "js.rbxcdn.com/") != NULL &&
+           strstr(url, "GameCarousel.") != NULL;
 }
 
 static bool leonos_fetch_url_is_roblox_react_core_script(const char *url)
@@ -641,27 +730,22 @@ static bool leonos_fetch_url_is_roblox_late_script(const char *url,
 
 static bool leonos_fetch_url_is_roblox_deferred_media(const char *url)
 {
-    size_t len;
     if (url == NULL || strstr(url, "rbxcdn.com/") == NULL) {
         return false;
     }
-    len = strlen(url);
-    for (size_t i = 0u; i < len; i += 1u) {
-        if (url[i] == '?' || url[i] == '#') {
-            len = i;
-            break;
-        }
+    if (leonos_fetch_url_names_decodable_image(url)) {
+        return false;
     }
     return strstr(url, "tr.rbxcdn.com/") != NULL ||
            strstr(url, "vignette") != NULL ||
-           (strstr(url, "images.rbxcdn.com/") != NULL &&
-            ((len >= 4u && strncmp(url + len - 4u, ".png", 4) == 0) ||
-             (len >= 4u && strncmp(url + len - 4u, ".jpg", 4) == 0) ||
-             (len >= 5u && strncmp(url + len - 5u, ".jpeg", 5) == 0) ||
-             (len >= 4u && strncmp(url + len - 4u, ".gif", 4) == 0) ||
-             (len >= 4u && strncmp(url + len - 4u, ".ico", 4) == 0) ||
-             (len >= 4u && strncmp(url + len - 4u, ".svg", 4) == 0) ||
-             (len >= 5u && strncmp(url + len - 5u, ".webp", 5) == 0)));
+           strstr(url, "images.rbxcdn.com/") != NULL;
+}
+
+static bool leonos_fetch_url_is_roblox_thumbnail_image(const char *url)
+{
+    return url != NULL &&
+           strstr(url, "tr.rbxcdn.com/") != NULL &&
+           leonos_fetch_url_names_decodable_image(url);
 }
 
 static void leonos_fetch_reset_roblox_dependencies(void)
@@ -1143,8 +1227,29 @@ static void leonos_fetch_log_bytes(struct leonos_fetch_context *ctx)
     leonos_fetch_log("\r\n");
 }
 
+static void leonos_fetch_prepare_synthetic_body(struct leonos_fetch_context *ctx)
+{
+    const char *content_type = ctx->content_type[0] != 0 ?
+            ctx->content_type : leonos_fetch_mime_from_url(nsurl_access(ctx->url));
+
+    if (ctx->data_len != 0u || strncmp(content_type, "image/png", 9) != 0) {
+        return;
+    }
+
+    ctx->data = malloc(sizeof(leonos_fetch_transparent_png));
+    if (ctx->data == NULL) {
+        return;
+    }
+    memcpy(ctx->data, leonos_fetch_transparent_png,
+           sizeof(leonos_fetch_transparent_png));
+    ctx->data_len = sizeof(leonos_fetch_transparent_png);
+}
+
 static void leonos_fetch_finish_buffered_body(struct leonos_fetch_context *ctx)
 {
+    if (ctx->synthetic_empty) {
+        leonos_fetch_prepare_synthetic_body(ctx);
+    }
     leonos_fetch_log_bytes(ctx);
     leonos_fetch_send_headers(ctx, true);
     if (!ctx->aborted) {
@@ -1186,7 +1291,8 @@ static void *leonos_fetch_setup(struct fetch *parent_fetch, nsurl *url,
     } else if (leonos_fetch_url_looks_css(nsurl_access(url))) {
         leonos_fetch_css_count += 1u;
         if (leonos_fetch_url_is_roblox_deferred_style(nsurl_access(url)) ||
-            leonos_fetch_url_is_roblox_deferred_bundle(nsurl_access(url)) ||
+            (strstr(nsurl_access(url), "css.rbxcdn.com/") == NULL &&
+             leonos_fetch_url_is_roblox_deferred_bundle(nsurl_access(url))) ||
             (LEONOS_FETCH_CSS_SOFT_LIMIT != 0u &&
             leonos_fetch_css_count > LEONOS_FETCH_CSS_SOFT_LIMIT)) {
             ctx->synthetic_empty = true;
@@ -1196,7 +1302,8 @@ static void *leonos_fetch_setup(struct fetch *parent_fetch, nsurl *url,
         }
     } else if (leonos_fetch_url_looks_js(nsurl_access(url))) {
         leonos_fetch_js_count += 1u;
-        if (leonos_fetch_url_is_roblox_landing_locale_script(nsurl_access(url)) ||
+        if (leonos_fetch_url_is_deferred_tracker(nsurl_access(url)) ||
+            leonos_fetch_url_is_roblox_landing_locale_script(nsurl_access(url)) ||
             leonos_fetch_url_is_roblox_late_script(nsurl_access(url),
                 leonos_fetch_js_count) ||
             leonos_fetch_url_is_roblox_deferred_bundle(nsurl_access(url)) ||
@@ -1378,6 +1485,9 @@ static unsigned int leonos_fetch_priority(
         }
         return begun ? 990u : 985u;
     }
+    if (leonos_fetch_url_is_roblox_thumbnail_image(url)) {
+        return begun ? 962u : 961u;
+    }
     if (leonos_fetch_url_looks_js(url)) {
         roblox_priority = leonos_fetch_roblox_pre_core_priority(url);
         if (roblox_priority != 0u) {
@@ -1407,6 +1517,12 @@ static unsigned int leonos_fetch_priority(
         if (leonos_fetch_url_is_roblox_react_landing_route_script(url)) {
             return begun ? 946u : 945u;
         }
+        if (leonos_fetch_url_is_roblox_thumbnails_script(url)) {
+            return begun ? 944u : 943u;
+        }
+        if (leonos_fetch_url_is_roblox_game_carousel_script(url)) {
+            return begun ? 944u : 943u;
+        }
         if (leonos_fetch_url_is_roblox_landing_route_script(url)) {
             return begun ? 942u : 941u;
         }
@@ -1414,6 +1530,10 @@ static unsigned int leonos_fetch_priority(
             return begun ? 940u : 939u;
         }
         return begun ? 740u : 730u;
+    }
+    if (strstr(url, "rbxcdn.com/") != NULL &&
+        leonos_fetch_url_names_decodable_image(url)) {
+        return begun ? 938u : 937u;
     }
     return begun ? 260u : 250u;
 }
@@ -1491,7 +1611,8 @@ static void leonos_fetch_poll(lwc_string *scheme)
         }
         RING_REMOVE(leonos_fetch_ring, ctx);
         bool finished = false;
-        bool finished_js = leonos_fetch_url_looks_js(nsurl_access(ctx->url));
+        bool finished_js = leonos_fetch_url_looks_js(nsurl_access(ctx->url)) &&
+                !ctx->synthetic_empty;
         processed += 1u;
 
         if (ctx->locked) {

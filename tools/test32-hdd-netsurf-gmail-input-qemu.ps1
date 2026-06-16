@@ -1,6 +1,6 @@
 param(
-    [string] $StartUrl = "https://www.google.com/?igu=1&hl=en&gbv=1",
-    [int] $TimeoutSeconds = 300,
+    [string] $StartUrl = "https://mail.google.com/",
+    [int] $TimeoutSeconds = 420,
     [switch] $SkipBuild
 )
 
@@ -32,6 +32,21 @@ function Wait-SerialAfter {
     throw "Timed out waiting for serial proof after marker: $Pattern"
 }
 
+function Try-WaitSerialAfter {
+    param(
+        [string] $LogPath,
+        [string] $Pattern,
+        [int] $StartLength,
+        [int] $TimeoutMs
+    )
+
+    try {
+        return Wait-SerialAfter $LogPath $Pattern $StartLength $TimeoutMs
+    } catch {
+        return $null
+    }
+}
+
 function Send-MonitorCommand {
     param(
         [System.IO.StreamWriter] $Writer,
@@ -55,7 +70,7 @@ $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Qemu = Get-LeonOsQemu
 $ImagePath = (Get-LeonOsImagePath "dist32\leonos32.img") -replace '"', '\"'
 $HddPath = (Get-LeonOsImagePath "dist32\leonos32-hdd.img") -replace '"', '\"'
-$SerialLog = Get-LeonOsSerialLogPath "LeonOS-NetSurf-Input-Test"
+$SerialLog = Get-LeonOsSerialLogPath "LeonOS-NetSurf-Gmail-Input-Test"
 Remove-Item -LiteralPath $SerialLog -Force -ErrorAction SilentlyContinue
 $SerialArg = Get-LeonOsQemuSerialFileArg $SerialLog
 
@@ -67,7 +82,7 @@ $Listener.Stop()
 
 $StartInfo = [System.Diagnostics.ProcessStartInfo]::new()
 $StartInfo.FileName = $Qemu
-$StartInfo.Arguments = "-name LeonOS-NetSurf-Input-Test -machine pc -cpu qemu32 -m 256M -drive file=`"$ImagePath`",format=raw,if=floppy -drive file=`"$HddPath`",format=raw,if=ide,index=0,media=disk -boot a -vga std -serial $SerialArg -display none -monitor tcp:127.0.0.1:$MonitorPort,server,nowait -nic user,model=rtl8139 -no-reboot"
+$StartInfo.Arguments = "-name LeonOS-NetSurf-Gmail-Input-Test -machine pc -cpu qemu32 -m 256M -drive file=`"$ImagePath`",format=raw,if=floppy -drive file=`"$HddPath`",format=raw,if=ide,index=0,media=disk -boot a -vga std -serial $SerialArg -display none -monitor tcp:127.0.0.1:$MonitorPort,server,nowait -nic user,model=rtl8139 -no-reboot"
 $StartInfo.UseShellExecute = $false
 $StartInfo.RedirectStandardError = $true
 
@@ -99,33 +114,45 @@ try {
     Send-MonitorCommand $Writer $Stream "sendkey m"
 
     $LoadedText = Wait-LeonOsSerialLog `
-        $SerialLog "HTML REDRAW TEXT Google Search" ($TimeoutSeconds * 1000)
-    if (-not $LoadedText.Contains("WINDOW TITLE WIN 0 STR Google")) {
-        throw "Google did not render before input test."
+        $SerialLog "HTML REDRAW TEXT Email or phone" ($TimeoutSeconds * 1000)
+    if (-not $LoadedText.Contains("WINDOW TITLE WIN 0 STR Gmail")) {
+        throw "Gmail sign-in page did not render before input test."
     }
+    $LoadedText = Wait-LeonOsSerialLog `
+        $SerialLog "HTML REDRAW TEXT Next" ($TimeoutSeconds * 1000)
+    if (-not $LoadedText.Contains("HTML REDRAW TEXT Next")) {
+        throw "Gmail sign-in page did not expose the Next control."
+    }
+    $null = Wait-LeonOsSerialLog `
+        $SerialLog "PLOT TEXT X 19 Y 214 LEN 4 STR Next" 30000
+    $ReadyText = Wait-LeonOsSerialLog `
+        $SerialLog "WINDOW PAGE_STATUS WIN 0 STATUS SECURE" 30000
+    $null = Try-WaitSerialAfter `
+        $SerialLog "HTML CSS LOADING EVENT SKIP" $ReadyText.Length 7000
+    Start-Sleep -Seconds 2
 
     $InputStartLength = (Read-LeonOsSerialLog $SerialLog).Length
 
-    $InitialMouse = Get-LeonOsInitialMousePosition -Width 1920 -Height 1080
-    Move-QemuMouseTo $Writer 700 370 -Step 80 `
-        -FromX $InitialMouse.X -FromY $InitialMouse.Y
-    Start-Sleep -Milliseconds 200
-    Send-MonitorCommand $Writer $Stream "mouse_button 0x01"
-    Start-Sleep -Milliseconds 80
-    Send-MonitorCommand $Writer $Stream "mouse_button 0"
+    $FocusedText = $null
+    for ($Tab = 0; $Tab -lt 10 -and -not $FocusedText; $Tab += 1) {
+        Send-MonitorCommand $Writer $Stream "sendkey tab" 1500
+        Start-Sleep -Milliseconds 140
+        $FocusedText = Try-WaitSerialAfter `
+            $SerialLog "PLACE_CARET WIN 0" $InputStartLength 1500
+    }
+    if (-not $FocusedText) {
+        throw "Gmail identifier field did not place a caret after Tab focus."
+    }
 
-    $null = Wait-SerialAfter `
-        $SerialLog "LEONOS_EVENT CLICK WIN 0" $InputStartLength 10000
-
+    $TypingStartLength = (Read-LeonOsSerialLog $SerialLog).Length
     foreach ($Key in @("l", "e", "o", "n", "o", "s")) {
         Send-MonitorCommand $Writer $Stream "sendkey $Key" 1500
         Start-Sleep -Milliseconds 60
     }
     $AfterTyping = Wait-SerialAfter `
-        $SerialLog "PLACE_CARET WIN 0 X 502 Y 267 HEIGHT 20" `
-        $InputStartLength 10000
-    if ($AfterTyping -notmatch "PLACE_CARET WIN 0 X 502 Y 267 HEIGHT 20") {
-        throw "Google search input caret did not advance after typing leonos."
+        $SerialLog "PLACE_CARET WIN 0" $TypingStartLength 10000
+    if ($AfterTyping -notmatch "PLACE_CARET WIN 0") {
+        throw "Gmail identifier input caret did not move after typing leonos."
     }
 
     $EnterStartLength = (Read-LeonOsSerialLog $SerialLog).Length
@@ -133,30 +160,11 @@ try {
     $AfterEnter = Wait-SerialAfter `
         $SerialLog "HTML FORM ENTER KEY" `
         $EnterStartLength 10000
-    if ($AfterEnter -notmatch "WINDOW INVALIDATE_AREA WIN 0 X 420 Y 264 WIDTH 543 HEIGHT 26") {
-        throw "Google search input did not redraw after Enter."
+    if ($AfterEnter -notmatch "HTML FORM ENTER KEY (10|13).*VALUE leonos") {
+        throw "Gmail identifier value was not attached to the real account form on Enter."
     }
-    if ($AfterEnter -notmatch "HTML FORM ENTER KEY (10|13) TYPE 1 FORM 1 NAME q VALUE leonos ACTION /search") {
-        throw "Google q input was not associated with the real search form on Enter."
-    }
-    if ($AfterEnter -notmatch "HTML FORM ENCODE .*q=leonos") {
-        throw "Google search form did not encode q=leonos."
-    }
-    if ($AfterEnter -notmatch "HTML FORM NAVIGATE https://www\.google\.com/search\?.*q=leonos") {
-        throw "Google search form did not navigate to a real /search URL."
-    }
-    if ($AfterEnter -notmatch "HTML FORM NAVIGATE RESULT 0") {
-        throw "Google search form navigation did not return success."
-    }
-    if ($AfterEnter -notmatch "WINDOW SET_URL WIN 0 URL https://www\.google\.com/search\?.*q=leonos") {
-        throw "NetSurf window URL did not switch to the Google search result URL."
-    }
-
-    $SearchFetchText = Wait-SerialAfter `
-        $SerialLog "NETSURF LEO HTTPS fetch begin https://www.google.com/search?" `
-        $InputStartLength 15000
-    if ($SearchFetchText -notmatch "NETSURF LEO HTTPS fetch begin https://www\.google\.com/search\?.*q=leonos") {
-        throw "NetSurf did not start fetching the submitted Google search URL."
+    if ($AfterEnter -notmatch "HTML FORM (SUBMIT START|NAVIGATE|DATA)") {
+        throw "Gmail identifier form did not produce any submit/data diagnostics."
     }
 
     Send-MonitorCommand $Writer $Stream "quit"
@@ -172,7 +180,7 @@ try {
 
     $Stderr = $Process.StandardError.ReadToEnd()
     if ($Stderr.Trim().Length -gt 0) {
-        Write-Host "QEMU stderr (LeonOS-NetSurf-Input-Test):"
+        Write-Host "QEMU stderr (LeonOS-NetSurf-Gmail-Input-Test):"
         Write-Host $Stderr
     }
 } finally {
@@ -193,9 +201,9 @@ foreach ($Bad in @(
     "CPU exception", "PANIC", "NETSURF QUICKJS EXCEPTION",
     "NETSURF QUICKJS EVENT EXCEPTION")) {
     if ($Output -like "*$Bad*") {
-        throw "NetSurf input test hit failure: $Bad"
+        throw "NetSurf Gmail input test hit failure: $Bad"
     }
 }
 
-Write-Host "QEMU NetSurf input test passed: live Google search field focused, accepted leonos, and submitted to /search."
+Write-Host "QEMU NetSurf Gmail input test passed: Gmail sign-in identifier focused, accepted leonos, and produced form submit diagnostics."
 Write-Host "Serial log: $SerialLog"

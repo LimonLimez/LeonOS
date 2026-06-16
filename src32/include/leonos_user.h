@@ -23,7 +23,8 @@ enum leonos_syscall {
     LEONOS_SYS_NET_STREAM_META = 16,
     LEONOS_SYS_NET_STREAM_CLOSE = 17,
     LEONOS_SYS_FB_TEXT = 18,
-    LEONOS_SYS_FB_BLIT = 19
+    LEONOS_SYS_FB_BLIT = 19,
+    LEONOS_SYS_NET_FETCH_EX = 20
 };
 
 enum leonos_net_stream_state {
@@ -85,6 +86,17 @@ struct leonos_net_fetch_meta {
     leonos_u32 flags;
     char content_type[64];
     char location[512];
+};
+
+struct leonos_net_fetch_request {
+    const char *url;
+    void *buffer;
+    leonos_u32 max_len;
+    const char *method;
+    const void *body;
+    leonos_u32 body_len;
+    const char *content_type;
+    const char *accept;
 };
 
 static inline leonos_u32 leonos_syscall0(leonos_u32 number)
@@ -244,6 +256,12 @@ static inline leonos_u32 leonos_net_fetch(const char *url, void *buffer,
 {
     return leonos_syscall3(LEONOS_SYS_NET_FETCH, (leonos_u32) url,
                            (leonos_u32) buffer, max_len);
+}
+
+static inline leonos_u32 leonos_net_fetch_ex(
+        struct leonos_net_fetch_request *request)
+{
+    return leonos_syscall1(LEONOS_SYS_NET_FETCH_EX, (leonos_u32) request);
 }
 
 static inline leonos_u32 leonos_net_fetch_meta(

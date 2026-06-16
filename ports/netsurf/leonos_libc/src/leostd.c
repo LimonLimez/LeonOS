@@ -396,16 +396,8 @@ static int leonos_try_keyboard_event(unsigned int scancode)
         leonos_focus_url_edit();
         return 0;
     }
-    if (scancode == 0x3Fu || scancode == 0x13u) {
+    if (scancode == 0x3Fu) {
         leonos_queue_stdin_line("WINDOW RELOAD 0\n");
-        return 1;
-    }
-    if (scancode == 0x30u) {
-        leonos_queue_stdin_line("WINDOW BACK 0\n");
-        return 1;
-    }
-    if (scancode == 0x31u) {
-        leonos_queue_stdin_line("WINDOW FORWARD 0\n");
         return 1;
     }
     if (scancode == 0x48u) {
@@ -440,6 +432,10 @@ static int leonos_try_keyboard_event(unsigned int scancode)
     }
     if (scancode == 0x0Eu) {
         leonos_queue_stdin_line("WINDOW KEY 0 VALUE 8\n");
+        return 1;
+    }
+    if (scancode == 0x0Fu) {
+        leonos_queue_stdin_line("WINDOW KEY 0 VALUE 9\n");
         return 1;
     }
     if (scancode == 0x1Cu) {
@@ -499,6 +495,21 @@ static void leonos_prepare_interactive_stdin(void)
 
     if (leonos_pending_stdin_ready) {
         return;
+    }
+
+    for (unsigned int i = 0u; i < 8u; i += 1u) {
+        if (!leonos_event_poll(&event)) {
+            break;
+        }
+        if (event.type == LEONOS_EVENT_KEYBOARD &&
+            leonos_try_keyboard_event(event.data0)) {
+            return;
+        }
+        if ((event.type == LEONOS_EVENT_MOUSE ||
+             event.type == LEONOS_EVENT_MOUSE_BUTTON) &&
+            leonos_try_mouse_event(&event)) {
+            return;
+        }
     }
 
     if (leonos_netsurf_fetch_generation_for_script !=

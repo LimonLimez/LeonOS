@@ -57,11 +57,14 @@ static void write_snippet(const char *html, leonos_u32 len)
 int leonos_user_main(void)
 {
     static const char url[] = "https://www.example.com/";
+    static const char post_url[] = "https://postman-echo.com/post";
+    static const char post_body[] = "leonos_post=ok";
     char *body;
     leonos_u32 nbytes;
     struct leonos_fb_info fb;
+    struct leonos_net_fetch_request post;
 
-    leonos_write("UWEB user HTTPS fetch + browser\r\n");
+    leonos_write("UWEB user HTTPS fetch POST + browser\r\n");
     body = (char *) leonos_malloc(16384u);
     if (!body) {
         leonos_write("malloc failed\r\n");
@@ -75,6 +78,25 @@ int leonos_user_main(void)
 
     nbytes = leonos_net_fetch(url, body, 16384u);
     leonos_write("fetched ");
+    write_u32(nbytes);
+    leonos_write(" bytes\r\n");
+    if (nbytes == 0u) {
+        leonos_free(body);
+        return 1;
+    }
+
+    write_snippet(body, nbytes);
+
+    post.url = post_url;
+    post.buffer = body;
+    post.max_len = 16384u;
+    post.method = "POST";
+    post.body = post_body;
+    post.body_len = sizeof(post_body) - 1u;
+    post.content_type = "application/x-www-form-urlencoded";
+    post.accept = "application/json,*/*";
+    nbytes = leonos_net_fetch_ex(&post);
+    leonos_write("post fetched ");
     write_u32(nbytes);
     leonos_write(" bytes\r\n");
     if (nbytes == 0u) {
