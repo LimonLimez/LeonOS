@@ -252,6 +252,7 @@ static volatile u8 pending_user_app;
 static volatile u8 pending_shell_app;
 static volatile u8 pending_user_browser_open;
 static volatile u8 user_app_running;
+static volatile u8 user_app_netsurf_running;
 static volatile u8 user_fb_overlay_active;
 static char pending_user_browser_url[USER_BROWSER_URL_MAX];
 static char user_url_copy[USER_BROWSER_URL_MAX];
@@ -1595,6 +1596,8 @@ static u8 find_loaded_file(const char *display_name, u32 *out_cluster, u32 *out_
 
 static void restore_cursor(void);
 static void draw_cursor_overlay(void);
+static u32 user_fb_clip_limit_y(void);
+static void user_fb_present_overlay(void);
 
 /* --- ATA PIO (primary master) read-only driver -------------------------- */
 
@@ -2543,6 +2546,16 @@ static u8 user_syscall_fb_fill(u32 x, u32 y, u32 w, u32 h, u32 color)
     if (g_boot->framebuffer.address == 0 || w == 0u || h == 0u) {
         return 0u;
     }
+    u32 limit_y = user_fb_clip_limit_y();
+    if (y >= limit_y) {
+        return 1u;
+    }
+    if (h > limit_y - y) {
+        h = limit_y - y;
+    }
+    if (h == 0u) {
+        return 1u;
+    }
 
     volatile u32 *old_pixels = draw_pixels_override;
     u32 old_stride = draw_stride_override;
@@ -2568,7 +2581,7 @@ static u8 user_syscall_fb_present(void)
     }
     user_fb_overlay_active = 1u;
     dirty = 0u;
-    framebuffer_present();
+    user_fb_present_overlay();
     if (!user_fb_present_reported) {
         user_fb_present_reported = 1u;
         serial_print_line(msg_user_fb_present);
@@ -2602,6 +2615,10 @@ static u8 user_syscall_fb_text(u32 x, u32 y, u32 text_ptr, u32 color)
         } else {
             text[sizeof(text) - 1u] = 0;
         }
+    }
+    u32 limit_y = user_fb_clip_limit_y();
+    if (y >= limit_y || gui_line_height() > limit_y - y) {
+        return 1u;
     }
 
     volatile u32 *old_pixels = draw_pixels_override;
@@ -2681,6 +2698,16 @@ static u8 user_syscall_fb_blit(u32 desc_ptr)
     }
     if (height > g_boot->framebuffer.height - dst_y) {
         height = g_boot->framebuffer.height - dst_y;
+    }
+    u32 limit_y = user_fb_clip_limit_y();
+    if (dst_y >= limit_y) {
+        return 1u;
+    }
+    if (height > limit_y - dst_y) {
+        height = limit_y - dst_y;
+    }
+    if (height == 0u) {
+        return 1u;
     }
 
     volatile u32 *old_pixels = draw_pixels_override;
@@ -2796,7 +2823,11 @@ static u8 user_syscall_yield(void)
 {
     scheduler_run_once();
     if (framebuffer_back_ready) {
-        framebuffer_present();
+        if (user_fb_overlay_active) {
+            user_fb_present_overlay();
+        } else {
+            framebuffer_present();
+        }
     }
     if (!user_fb_overlay_active) {
         dirty = 1;
@@ -3336,6 +3367,7 @@ static void leo_run_user_app(const char raw_name[11], const char *display_name)
     event_clear();
     user_event_poll_reported = 0u;
     user_app_running = 1;
+    user_app_netsurf_running = is_netsurf;
 
     u32 entry_addr = USER_VIRT_BASE + entry_offset;
     u32 user_esp = user_stack_limit - 16u; /* leave a little headroom, 16-aligned */
@@ -3374,6 +3406,7 @@ static void leo_run_user_app(const char raw_name[11], const char *display_name)
     user_heap_next = 0;
     user_heap_first = 0u;
     user_app_running = 0;
+    user_app_netsurf_running = 0u;
     user_fb_overlay_active = 0u;
     dirty = 1;
 }
@@ -13109,6 +13142,36 @@ static void shell_serial_emit(enum ShellSerialMsg msg)
 }
 
 #include "shell_ui.inc.c"
+
+static u32 user_fb_clip_limit_y(void)
+{
+    if (user_app_netsurf_running && shellm.taskbar_y > 0u &&
+        shellm.taskbar_y < g_boot->framebuffer.height) {
+        return shellm.taskbar_y;
+    }
+    return g_boot->framebuffer.height;
+}
+
+static void user_fb_present_overlay(void)
+{
+    if (!framebuffer_back_ready) {
+        return;
+    }
+
+    if (user_app_netsurf_running) {
+        volatile u32 *old_pixels = draw_pixels_override;
+        u32 old_stride = draw_stride_override;
+        draw_pixels_override = framebuffer_back;
+        draw_stride_override = framebuffer_back_stride;
+        shell_draw_taskbar();
+        draw_pixels_override = old_pixels;
+        draw_stride_override = old_stride;
+    }
+
+    framebuffer_present();
+    cursor_drawn = 0u;
+    draw_cursor_overlay();
+}
 
 static void handle_mouse_packet(void)
 {
