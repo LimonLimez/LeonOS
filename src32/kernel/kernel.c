@@ -423,6 +423,7 @@ static u8 mouse_packet_index;
 static u8 mouse_packet0;
 static u8 mouse_packet1;
 static u8 mouse_packet2;
+static u8 keyboard_ctrl_down;
 static u8 cursor_drawn;
 static i32 cursor_saved_x;
 static i32 cursor_saved_y;
@@ -13323,8 +13324,14 @@ static void handle_keyboard(void)
 {
     u8 scancode = inb(0x60u);
     u8 user_overlay_input = user_app_running && user_fb_overlay_active;
-    if (scancode == 0x1Du || scancode == 0x9Du ||
-        scancode == 0x38u || scancode == 0xB8u ||
+    if (scancode == 0x1Du || scancode == 0x9Du) {
+        keyboard_ctrl_down = (scancode == 0x1Du);
+        if (!user_overlay_input) {
+            shell_keyboard(scancode);
+        }
+        return;
+    }
+    if (scancode == 0x38u || scancode == 0xB8u ||
         scancode == 0x2Au || scancode == 0xAAu ||
         scancode == 0x36u || scancode == 0xB6u) {
         if (!user_overlay_input) {
@@ -13333,6 +13340,11 @@ static void handle_keyboard(void)
         return;
     }
     if ((scancode & 0x80u) != 0) {
+        return;
+    }
+    if (user_overlay_input && user_app_netsurf_running &&
+        keyboard_ctrl_down && scancode == 0x26u) {
+        event_push(EVENT_KEYBOARD, 0x40u, 0);
         return;
     }
     event_push(EVENT_KEYBOARD, scancode, 0);
@@ -13369,8 +13381,6 @@ static void handle_keyboard(void)
         pending_user_app = USER_APP_UNETRUN;
     } else if (scancode == 0x2Du) {
         pending_user_app = USER_APP_UWEB;
-    } else if (scancode == 0x32u) {
-        pending_user_app = USER_APP_NETSURF;
     } else if (scancode == 0x1Fu) {
         pending_user_app = USER_APP_USTREAM;
     } else if (scancode == 0x24u) {

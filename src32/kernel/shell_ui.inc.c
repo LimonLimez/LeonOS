@@ -2884,12 +2884,17 @@ static u8 shell_launch_app(u8 app_id)
         return 0u;
     }
     shell_serial_event(shell_app_msg(app_id));
-    if (app->win_type != SHELL_WIN_NONE) {
-        u8 opened = shell_restore_or_create_window(app->win_type) != 0xFFu;
-        if (opened && app_id == SHELL_APP_NET) {
-            net_browser_open_default_url();
+    if (app_id == SHELL_APP_NET) {
+        u8 opened = shell_restore_or_create_window(SHELL_WIN_NET) != 0xFFu;
+        if (opened && !user_app_running) {
+            pending_user_app = USER_APP_NETSURF;
         }
+        shell_ui_pulse();
+        dirty = 1;
         return opened;
+    }
+    if (app->win_type != SHELL_WIN_NONE) {
+        return shell_restore_or_create_window(app->win_type) != 0xFFu;
     }
     if (app->action == SHELL_ACTION_UHELLO ||
         app->action == SHELL_ACTION_UGFX ||
@@ -3607,49 +3612,60 @@ static void shell_keyboard(u8 scancode)
     if (scancode == 0x1Fu || scancode == 0x3Bu) {
         serial_print_line(ui_msg_shell_key_start);
         shell_toggle_start_menu();
+        shell_key_consumed = 1u;
         return;
     }
 
     if (scancode == 0x14u || scancode == 0x3Cu) {
         shell_toggle_files_tab();
+        shell_key_consumed = 1u;
         return;
     }
 
     if (shell_k_ctrl && scancode == 0x0Fu) {
         shell_toggle_files_tab();
+        shell_key_consumed = 1u;
         return;
     }
 
     if (scancode == 0x3Du) {
         shell_launch_app(SHELL_APP_APPS);
+        shell_key_consumed = 1u;
         return;
     }
     if (scancode == 0x3Eu) {
         shell_launch_app(SHELL_APP_LOG);
+        shell_key_consumed = 1u;
         return;
     }
     if (scancode == 0x3Fu) {
         shell_launch_app(SHELL_APP_ABOUT);
+        shell_key_consumed = 1u;
         return;
     }
     if (scancode == 0x40u) {
         shell_launch_app(SHELL_APP_FILES);
+        shell_key_consumed = 1u;
         return;
     }
     if (scancode == 0x57u) {
         shell_launch_app(SHELL_APP_NET);
+        shell_key_consumed = 1u;
         return;
     }
     if (scancode == 0x42u) {
         shell_launch_app(SHELL_APP_HELLO);
+        shell_key_consumed = 1u;
         return;
     }
     if (scancode == 0x43u) {
         shell_launch_app(SHELL_APP_UHELLO);
+        shell_key_consumed = 1u;
         return;
     }
     if (scancode == 0x44u) {
         shell_launch_app(SHELL_APP_WRITE);
+        shell_key_consumed = 1u;
         return;
     }
 
@@ -3726,6 +3742,7 @@ static void shell_keyboard(u8 scancode)
             }
             shell_ui_pulse();
         }
+        shell_key_consumed = 1u;
         return;
     }
     if (scancode == 0x2Du || (shell_k_alt && scancode == 0x2Du)) {
@@ -3733,6 +3750,7 @@ static void shell_keyboard(u8 scancode)
             shell_apply_maximize(shell_focus_idx);
             shell_ui_pulse();
         }
+        shell_key_consumed = 1u;
         return;
     }
     if (scancode == 0x2Eu || (shell_k_alt && scancode == 0x2Eu)) {
@@ -3740,26 +3758,31 @@ static void shell_keyboard(u8 scancode)
             shell_close(shell_focus_idx);
             shell_ui_pulse();
         }
+        shell_key_consumed = 1u;
         return;
     }
     if (shell_k_alt && scancode == 0x4Bu && shell_focus_idx != 0xFFu) {
         shell_wins[shell_focus_idx].x -= (i32) sx(16u);
         dirty = 1;
+        shell_key_consumed = 1u;
         return;
     }
     if (shell_k_alt && scancode == 0x4Du && shell_focus_idx != 0xFFu) {
         shell_wins[shell_focus_idx].x += (i32) sx(16u);
         dirty = 1;
+        shell_key_consumed = 1u;
         return;
     }
     if (shell_k_alt && scancode == 0x48u && shell_focus_idx != 0xFFu) {
         shell_wins[shell_focus_idx].y -= (i32) sy(16u);
         dirty = 1;
+        shell_key_consumed = 1u;
         return;
     }
     if (shell_k_alt && scancode == 0x50u && shell_focus_idx != 0xFFu) {
         shell_wins[shell_focus_idx].y += (i32) sy(16u);
         dirty = 1;
+        shell_key_consumed = 1u;
         return;
     }
     if (scancode == 0x41u && shell_focus_idx != 0xFFu) {

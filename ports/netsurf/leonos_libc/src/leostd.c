@@ -260,6 +260,7 @@ static int leonos_pending_stdin_ready;
 static char leonos_url_edit[512] = LEONOS_NETSURF_START_URL;
 static unsigned int leonos_url_edit_len;
 static int leonos_url_editing;
+static int leonos_url_edit_capture;
 static unsigned int leonos_last_redraw_generation;
 static unsigned int leonos_interactive_settle_polls;
 
@@ -332,14 +333,17 @@ static void leonos_draw_url_edit(void)
 static void leonos_focus_url_edit(void)
 {
     leonos_url_editing = 1;
+    leonos_url_edit_capture = 1;
     leonos_url_edit[0] = 0;
     leonos_url_edit_len = 0u;
+    leonos_write_stdout("NETSURF URL EDIT FOCUS\r\n");
     leonos_draw_url_edit();
 }
 
 static void leonos_blur_url_edit(void)
 {
     leonos_url_editing = 0;
+    leonos_url_edit_capture = 0;
 }
 
 static void leonos_submit_url_edit(void)
@@ -365,10 +369,10 @@ static int leonos_try_keyboard_event(unsigned int scancode)
         return 0;
     }
 
-    if (leonos_url_editing) {
+    if (leonos_url_editing || leonos_url_edit_capture) {
         if (scancode == 0x01u) {
             leonos_blur_url_edit();
-            return 0;
+            return 1;
         }
         if (scancode == 0x1Cu) {
             leonos_submit_url_edit();
@@ -380,7 +384,7 @@ static int leonos_try_keyboard_event(unsigned int scancode)
                 leonos_url_edit[leonos_url_edit_len] = 0;
                 leonos_draw_url_edit();
             }
-            return 0;
+            return 1;
         }
         ch = leonos_scancode_ascii(scancode);
         if (ch != 0 && ch != ' ' &&
@@ -389,7 +393,7 @@ static int leonos_try_keyboard_event(unsigned int scancode)
             leonos_url_edit[leonos_url_edit_len] = 0;
             leonos_draw_url_edit();
         }
-        return 0;
+        return 1;
     }
 
     if (scancode == 0x40u) {

@@ -96,7 +96,7 @@ try {
 
     $null = Wait-LeonOsSerialLog $SerialLog "LeonOS shell ready" 90000
     $null = Wait-LeonOsSerialLog $SerialLog "LeonOS cooperative scheduler OK" 90000
-    Send-MonitorCommand $Writer $Stream "sendkey m"
+    Send-MonitorCommand $Writer $Stream "sendkey f11"
 
     $LoadedText = Wait-LeonOsSerialLog `
         $SerialLog "HTML REDRAW TEXT Google Search" ($TimeoutSeconds * 1000)

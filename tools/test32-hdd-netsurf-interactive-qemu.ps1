@@ -11,6 +11,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "qemu-common.ps1")
+. (Join-Path $PSScriptRoot "visual-common.ps1")
 
 if (-not $SkipBuild) {
     & (Join-Path $PSScriptRoot "..\ports\netsurf\build-leonos-probe.ps1") `
@@ -47,7 +48,7 @@ function Send-LeonOsTextKeys {
             default { [string] $Char }
         }
         Send-LeonOsMonitorLine $Writer $Stream "sendkey $Key"
-        Start-Sleep -Milliseconds 40
+        Start-Sleep -Milliseconds 180
     }
 }
 
@@ -113,7 +114,7 @@ try {
         throw "QEMU did not reach the LeonOS shell."
     }
 
-    Send-LeonOsMonitorLine $Writer $Stream "sendkey m"
+    Send-LeonOsMonitorLine $Writer $Stream "sendkey f11"
 
     $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $Loaded = ""
@@ -128,13 +129,24 @@ try {
         throw "Interactive NetSurf did not complete the first redraw."
     }
 
-    Send-LeonOsMonitorLine $Writer $Stream "sendkey down"
-    $Scrolled = Wait-LeonOsSerialLog $SerialLog "WINDOW SCROLL WIN 0 X 0 Y 96" 30000
-    if (-not $Scrolled.Contains("WINDOW SCROLL WIN 0 X 0 Y 96")) {
-        throw "Down key did not scroll the NetSurf viewport."
+    for ($Move = 0; $Move -lt 40; $Move += 1) {
+        $Writer.WriteLine("mouse_move -32 -32")
+        Start-Sleep -Milliseconds 25
     }
+    Start-Sleep -Milliseconds 250
+    Move-QemuMouseTo $Writer 220 38 -Step 32 `
+        -FromX 0 -FromY 0
+    Start-Sleep -Milliseconds 200
+    Send-LeonOsMonitorLine $Writer $Stream "mouse_button 0x01"
+    Start-Sleep -Milliseconds 100
+    Send-LeonOsMonitorLine $Writer $Stream "mouse_button 0"
 
-    Send-LeonOsMonitorLine $Writer $Stream "sendkey f6"
+    $FocusText = Wait-LeonOsSerialLog $SerialLog "NETSURF URL EDIT FOCUS" 30000
+    if (-not $FocusText.Contains("NETSURF URL EDIT FOCUS")) {
+        throw "NetSurf address bar did not focus after click."
+    }
+    Start-Sleep -Milliseconds 300
+
     $BeforeNavigate = Read-LeonOsSerialLog $SerialLog
     $BeforeNavigateLength = $BeforeNavigate.Length
     Send-LeonOsTextKeys $Writer $Stream $TypedUrl

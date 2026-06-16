@@ -216,7 +216,7 @@ try {
         throw "QEMU did not reach LeonOS cooperative scheduler."
     }
 
-    $Writer.WriteLine("sendkey m")
+    $Writer.WriteLine("sendkey f11")
     Wait-QemuMonitorPrompt $Stream 3000
 
     $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)

@@ -112,7 +112,7 @@ try {
         throw "QEMU did not reach LeonOS cooperative scheduler before launch timeout."
     }
 
-    $Writer.WriteLine("sendkey m")
+    $Writer.WriteLine("sendkey f11")
     Wait-QemuMonitorPrompt $Stream 3000
 
     $SawFetchBytes = $false
