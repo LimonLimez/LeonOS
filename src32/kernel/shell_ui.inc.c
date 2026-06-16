@@ -186,8 +186,8 @@ static const char app_name_unetrun[] = "NetSurf Runtime";
 static const char app_desc_unetrun[] = "Port harness (yield/heap)";
 static const char app_name_uweb[] = "User Web";
 static const char app_desc_uweb[] = "HTTPS fetch + browser";
-static const char app_name_netsurf[] = "Browser";
-static const char app_desc_netsurf[] = "NetSurf HTTPS browser";
+static const char app_name_netsurf[] = "NetSurf Port";
+static const char app_desc_netsurf[] = "Real engine smoke app";
 static const char app_name_ustream[] = "Net Stream";
 static const char app_desc_ustream[] = "Chunked user HTTPS API";
 static const char app_name_uqjs[] = "QuickJS Core";
@@ -231,13 +231,13 @@ static const struct ShellApp shell_apps[SHELL_APP_COUNT] = {
 static const u8 shell_start_app_ids[SHELL_APP_START_COUNT] = {
     SHELL_APP_FILES,
     SHELL_APP_APPS,
-    SHELL_APP_NETSURF,
+    SHELL_APP_NET,
     SHELL_APP_ABOUT,
     SHELL_APP_LOG
 };
 
 static const u8 shell_program_app_ids[SHELL_APP_PROGRAM_COUNT] = {
-    SHELL_APP_NETSURF
+    SHELL_APP_NET
 };
 
 static struct ShellWin shell_wins[SHELL_WIN_MAX];
@@ -2885,7 +2885,11 @@ static u8 shell_launch_app(u8 app_id)
     }
     shell_serial_event(shell_app_msg(app_id));
     if (app->win_type != SHELL_WIN_NONE) {
-        return shell_restore_or_create_window(app->win_type) != 0xFFu;
+        u8 opened = shell_restore_or_create_window(app->win_type) != 0xFFu;
+        if (opened && app_id == SHELL_APP_NET) {
+            net_browser_open_default_url();
+        }
+        return opened;
     }
     if (app->action == SHELL_ACTION_UHELLO ||
         app->action == SHELL_ACTION_UGFX ||
@@ -3633,7 +3637,7 @@ static void shell_keyboard(u8 scancode)
         return;
     }
     if (scancode == 0x57u) {
-        shell_launch_app(SHELL_APP_NETSURF);
+        shell_launch_app(SHELL_APP_NET);
         return;
     }
     if (scancode == 0x42u) {

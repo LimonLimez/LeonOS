@@ -14,17 +14,19 @@ Implemented in LeonOS:
 - a fixed 16 MiB `0x40000000` user virtual window so freestanding C globals,
   strings, heap allocations, and stack syscall buffers work;
 - a tiny LEO1 crt0/linker path plus `UCDEMO.LEO`, a C user app verified in QEMU;
-- a single user-facing Programs -> **Browser** entry that launches
-  `NETSURF.LEO` as the integrated browser app;
+- a single user-facing Programs -> **Browser** entry that opens the
+  shell-managed LeonOS browser window, keeping the taskbar, mouse, titlebar,
+  and desktop controls visible;
 - `SYS_BROWSER_OPEN` plus `UBROWSER.LEO`, a ring-3 launcher that queues a real
   kernel HTTPS browser session for regression testing (legacy hotkey **B**);
 - `SYS_YIELD`, `SYS_MILLIS`, `SYS_MALLOC`, and `SYS_FREE` for long-running port
   harnesses;
 - `UNETRUN.LEO` plus legacy hotkey **N**: proves the
   yield/heap/malloc path and then opens the real browser;
-- `NETSURF.LEO` plus Programs -> **Browser** (or press **F11**): launches
-  NetSurf's real `monkey` frontend/core in ring 3 as an interactive browser
-  app. It creates a NetSurf window, opens
+- `NETSURF.LEO` plus the legacy developer hotkey **M**: launches NetSurf's
+  real `monkey` frontend/core in ring 3 as an interactive browser probe. It
+  takes over the browser drawing surface directly today, creates a NetSurf
+  window, opens
   `https://www.google.com/?igu=1&hl=en&gbv=1`, streams real Google HTTPS body
   bytes and subresources through LeonOS `SYS_NET_STREAM_*`, feeds those real
   bodies to NetSurf callbacks, runs the HTML/CSS/parser/content pipeline,
@@ -212,6 +214,8 @@ the framebuffer frontend expects a linearly mapped output surface plus an input
 surface. The current LeonOS syscall layer covers only the first sliver of that:
 framebuffer size, rectangle fill, present, and basic event polling.
 
-For the most complete current browser path, use Programs -> Browser or press
-**F11**. The older browser probes remain available for targeted regression runs,
-but they are intentionally hidden from the user-facing Programs list.
+For the polished user-facing browser path, use Programs -> Browser or press
+**F11**. That path stays inside the LeonOS shell so the taskbar, mouse, and
+window controls remain visible. The NetSurf probe remains available for targeted
+regression runs, but it is intentionally hidden from the user-facing Programs
+list until it can run as a shell-managed browser window.

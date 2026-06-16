@@ -435,11 +435,12 @@ network stack. With `-nic user,model=rtl8139`, LeonOS can:
 
 | Key / menu | App | What it does |
 | --- | --- | --- |
-| **F11** / Programs -> **Browser** | `NETSURF.LEO` | Runs NetSurf's real monkey frontend/core as the single visible browser app, opens `https://www.google.com/?igu=1&hl=en&gbv=1`, streams real HTTPS HTML/CSS/images through LeonOS, and redraws through NetSurf's plot path |
+| **F11** / Programs -> **Browser** | shell browser window | Opens the LeonOS-managed browser window with the normal desktop taskbar, mouse, titlebar, URL bar, HTTPS fetch/render path, forms, images, and page controls |
 
 The older browser probes (`UBROWSER.LEO`, `UNETRUN.LEO`, `UWEB.LEO`,
-`USTREAM.LEO`, and `UQJS.LEO`) remain on disk for regression tests and direct
-developer hotkeys, but they are no longer separate user-facing Programs entries.
+`NETSURF.LEO`, `USTREAM.LEO`, and `UQJS.LEO`) remain on disk for regression
+tests and direct developer hotkeys, but they are no longer separate user-facing
+Programs entries.
 
 Run with network:
 

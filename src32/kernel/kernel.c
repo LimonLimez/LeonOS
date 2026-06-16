@@ -10709,11 +10709,11 @@ static void net_browser_open_port_status_page(void)
         "<h1>LeonOS Browser</h1>"
         "<div class=\"card\"><p>This is the real LeonOS HTTPS browser: TLS, HTML, "
         "layout, forms, images, navigation, and an honest strict NOJS mode.</p>"
-        "<p class=\"note\">Programs now exposes one Browser app. It launches the "
-        "NetSurf-backed ring-3 browser path, while this kernel browser remains as "
-        "the built-in status and fallback view.</p></div>"
+        "<p class=\"note\">Programs exposes one Browser app. It opens inside the "
+        "LeonOS desktop shell so the taskbar, mouse, and window controls remain "
+        "available while the page loads.</p></div>"
         "<div class=\"card\"><p>Launch <strong>Browser</strong> from Programs or "
-        "press <strong>F11</strong> to start the unified browser app.</p>"
+        "press <strong>F11</strong> to open this shell-managed browser window.</p>"
         "<p>Try a real page: https://www.example.com/</p></div>"
         "</body></html>";
 
