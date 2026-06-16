@@ -435,13 +435,11 @@ network stack. With `-nic user,model=rtl8139`, LeonOS can:
 
 | Key / menu | App | What it does |
 | --- | --- | --- |
-| **F11** | kernel | Opens the in-kernel HTTPS browser window |
-| **B** | `UBROWSER.LEO` | Ring-3 launcher: queues a kernel browser session |
-| **N** | `UNETRUN.LEO` | NetSurf port harness: yield/heap, then opens browser |
-| **M** | `NETSURF.LEO` | Runs NetSurf's real monkey frontend/core as an interactive browser, opens `https://www.google.com/?igu=1&hl=en&gbv=1`, streams real HTTPS HTML/CSS/images through LeonOS, and redraws through NetSurf's plot path |
-| **X** | `UWEB.LEO` | Fetches `https://www.example.com/` into user memory, prints a text preview on serial, then opens the kernel browser |
-| **S** | `USTREAM.LEO` | Streams `https://www.google.com/` through the ring-3 HTTPS stream API, reads chunks, prints metadata, and closes cleanly |
-| Programs → **User Web** | `UWEB.LEO` | Same as **X** |
+| **F11** / Programs -> **Browser** | `NETSURF.LEO` | Runs NetSurf's real monkey frontend/core as the single visible browser app, opens `https://www.google.com/?igu=1&hl=en&gbv=1`, streams real HTTPS HTML/CSS/images through LeonOS, and redraws through NetSurf's plot path |
+
+The older browser probes (`UBROWSER.LEO`, `UNETRUN.LEO`, `UWEB.LEO`,
+`USTREAM.LEO`, and `UQJS.LEO`) remain on disk for regression tests and direct
+developer hotkeys, but they are no longer separate user-facing Programs entries.
 
 Run with network:
 

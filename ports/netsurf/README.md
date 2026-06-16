@@ -14,13 +14,15 @@ Implemented in LeonOS:
 - a fixed 16 MiB `0x40000000` user virtual window so freestanding C globals,
   strings, heap allocations, and stack syscall buffers work;
 - a tiny LEO1 crt0/linker path plus `UCDEMO.LEO`, a C user app verified in QEMU;
+- a single user-facing Programs -> **Browser** entry that launches
+  `NETSURF.LEO` as the integrated browser app;
 - `SYS_BROWSER_OPEN` plus `UBROWSER.LEO`, a ring-3 launcher that queues a real
-  kernel HTTPS browser session (Programs -> **LeonOS Browser**, or press **B**);
+  kernel HTTPS browser session for regression testing (legacy hotkey **B**);
 - `SYS_YIELD`, `SYS_MILLIS`, `SYS_MALLOC`, and `SYS_FREE` for long-running port
   harnesses;
-- `UNETRUN.LEO` plus Programs -> **NetSurf Runtime** (or press **N**): proves the
+- `UNETRUN.LEO` plus legacy hotkey **N**: proves the
   yield/heap/malloc path and then opens the real browser;
-- `NETSURF.LEO` plus Programs -> **NetSurf Port** (or press **M**): launches
+- `NETSURF.LEO` plus Programs -> **Browser** (or press **F11**): launches
   NetSurf's real `monkey` frontend/core in ring 3 as an interactive browser
   app. It creates a NetSurf window, opens
   `https://www.google.com/?igu=1&hl=en&gbv=1`, streams real Google HTTPS body
@@ -29,12 +31,12 @@ Implemented in LeonOS:
   decodes bitmap images, forwards real HTTP status/content-type metadata
   through `SYS_NET_STREAM_META`, redraws through the monkey plotter, accepts
   scroll/key/mouse events, and supports typed HTTPS URLs through the top bar;
-- `SYS_NET_FETCH` plus `UWEB.LEO` (**User Web**, press **X**): fetches a real
+- `SYS_NET_FETCH` plus `UWEB.LEO` (legacy hotkey **X**): fetches a real
   HTTPS page into ring-3 memory, prints a text preview, then opens the kernel
   browser UI;
 - `SYS_NET_STREAM_OPEN`, `SYS_NET_STREAM_POLL`, `SYS_NET_STREAM_READ`,
-  `SYS_NET_STREAM_META`, and `SYS_NET_STREAM_CLOSE` plus `USTREAM.LEO` (**Net
-  Stream**, press **S**): proves one active ring-3 HTTPS stream handle by
+  `SYS_NET_STREAM_META`, and `SYS_NET_STREAM_CLOSE` plus `USTREAM.LEO`
+  (legacy hotkey **S**): proves one active ring-3 HTTPS stream handle by
   reading the real Google HTTPS body in 1 KiB chunks, copying metadata, and
   closing without leaking leftover TLS bytes into the kernel browser renderer;
 - framebuffer info/fill/present syscalls;
@@ -210,6 +212,6 @@ the framebuffer frontend expects a linearly mapped output surface plus an input
 surface. The current LeonOS syscall layer covers only the first sliver of that:
 framebuffer size, rectangle fill, present, and basic event polling.
 
-For the most complete current browser path, use Programs -> NetSurf Port or
-press **M**. The older in-kernel LeonOS browser remains available with F11,
-Programs -> LeonOS Browser, or `leonos://browser` for port status.
+For the most complete current browser path, use Programs -> Browser or press
+**F11**. The older browser probes remain available for targeted regression runs,
+but they are intentionally hidden from the user-facing Programs list.

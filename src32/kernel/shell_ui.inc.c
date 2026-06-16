@@ -37,6 +37,8 @@ typedef enum {
 #define SHELL_APP_USTREAM 14u
 #define SHELL_APP_UQJS 15u
 #define SHELL_APP_COUNT 16u
+#define SHELL_APP_START_COUNT 5u
+#define SHELL_APP_PROGRAM_COUNT 1u
 
 #define SHELL_ACTION_NONE 0u
 #define SHELL_ACTION_HELLO 1u
@@ -126,7 +128,7 @@ static const char ui_txt_fat32_rw[] = "FAT32 READ WRITE";
 static const char ui_txt_backbuffer[] = "BACKBUFFER DESKTOP";
 static const char ui_txt_leo1[] = "LEO1 RING0 + RING3";
 static const char ui_txt_programs[] = "PROGRAMS";
-static const char ui_txt_programs_desc[] = "OPEN WINDOWS AND RUN REAL LEO1 APPS";
+static const char ui_txt_programs_desc[] = "ONE BROWSER APP";
 static const char ui_txt_run[] = "RUN";
 static const char ui_txt_open_badge[] = "OPEN";
 static const char ui_txt_shell_log[] = "SHELL LOG";
@@ -184,8 +186,8 @@ static const char app_name_unetrun[] = "NetSurf Runtime";
 static const char app_desc_unetrun[] = "Port harness (yield/heap)";
 static const char app_name_uweb[] = "User Web";
 static const char app_desc_uweb[] = "HTTPS fetch + browser";
-static const char app_name_netsurf[] = "NetSurf Port";
-static const char app_desc_netsurf[] = "Real engine smoke app";
+static const char app_name_netsurf[] = "Browser";
+static const char app_desc_netsurf[] = "NetSurf HTTPS browser";
 static const char app_name_ustream[] = "Net Stream";
 static const char app_desc_ustream[] = "Chunked user HTTPS API";
 static const char app_name_uqjs[] = "QuickJS Core";
@@ -224,6 +226,18 @@ static const struct ShellApp shell_apps[SHELL_APP_COUNT] = {
       app_name_ustream, app_desc_ustream },
     { SHELL_APP_UQJS, SHELL_WIN_NONE, SHELL_ACTION_UQJS, UI_SPRITE_INFO,
       app_name_uqjs, app_desc_uqjs },
+};
+
+static const u8 shell_start_app_ids[SHELL_APP_START_COUNT] = {
+    SHELL_APP_FILES,
+    SHELL_APP_APPS,
+    SHELL_APP_NETSURF,
+    SHELL_APP_ABOUT,
+    SHELL_APP_LOG
+};
+
+static const u8 shell_program_app_ids[SHELL_APP_PROGRAM_COUNT] = {
+    SHELL_APP_NETSURF
 };
 
 static struct ShellWin shell_wins[SHELL_WIN_MAX];
@@ -314,7 +328,7 @@ static void shell_metrics_init(void)
     if (shellm.start_menu_w > g_boot->framebuffer.width - sx(12u)) {
         shellm.start_menu_w = g_boot->framebuffer.width - sx(12u);
     }
-    shellm.start_menu_h = shellm.menu_header_h + shellm.menu_row_h * SHELL_APP_COUNT + sy(12u);
+    shellm.start_menu_h = shellm.menu_header_h + shellm.menu_row_h * SHELL_APP_START_COUNT + sy(12u);
 }
 
 static void shell_files_default_rect(i32 *out_x, i32 *out_y, u32 *out_w, u32 *out_h)
@@ -973,7 +987,7 @@ static u8 shell_apps_row_at(const struct ShellWin *win, i32 mx, i32 my)
     }
     u32 rel = (u32) my - row_y;
     u32 row = rel / stride;
-    if (row >= SHELL_APP_COUNT || (rel - row * stride) >= row_h) {
+    if (row >= SHELL_APP_PROGRAM_COUNT || (rel - row * stride) >= row_h) {
         return 0xFFu;
     }
     return (u8) row;
@@ -1002,26 +1016,27 @@ static void shell_draw_apps_client(const struct ShellWin *win)
     u32 row_x = x + sx(12u);
     u32 row_w = w > sx(24u) ? w - sx(24u) : w;
     u32 row_y = y + (shellm.compact ? sy(42u) : sy(56u));
-    for (u8 i = 0u; i < SHELL_APP_COUNT; i += 1u) {
+    for (u8 i = 0u; i < SHELL_APP_PROGRAM_COUNT; i += 1u) {
         if (row_y + row_h > y + h - sy(8u)) {
             break;
         }
+        const struct ShellApp *app = &shell_apps[shell_program_app_ids[i]];
         u32 bg = (i & 1u) ? 0x00EEF4FBu : SHELL_COL_PANEL;
         ui_fill_round_rect(row_x, row_y, row_w, row_h, 6u, bg);
         fill_rect(row_x, row_y + row_h - 1u, row_w, 1u, SHELL_COL_BORDER);
         shell_draw_vector_icon_colored(row_x + sx(10u), row_y, sx(36u), row_h,
-                                       shell_apps[i].icon, 0x001A73E8u,
+                                       app->icon, 0x001A73E8u,
                                        0x002D3748u, 0x001A73E8u);
         draw_text_clip(row_x + sx(56u), row_y + (row_h - gui_line_height()) / 2u,
-                       shell_apps[i].name, SHELL_COL_TEXT, row_w - sx(150u));
+                       app->name, SHELL_COL_TEXT, row_w - sx(150u));
         if (!shellm.compact) {
             draw_text_clip(row_x + sx(230u), row_y + (row_h - gui_line_height()) / 2u,
-                           shell_apps[i].desc, SHELL_COL_MUTED, row_w - sx(330u));
+                           app->desc, SHELL_COL_MUTED, row_w - sx(330u));
         }
         ui_fill_round_rect(row_x + row_w - sx(82u), row_y + (row_h - sy(28u)) / 2u,
                            sx(70u), sy(28u), 5u, 0x00E8F1FFu);
         draw_text_clip(row_x + row_w - sx(74u), row_y + (row_h - gui_line_height()) / 2u,
-                       shell_apps[i].win_type == SHELL_WIN_NONE ? ui_txt_run : ui_txt_open_badge,
+                       app->win_type == SHELL_WIN_NONE ? ui_txt_run : ui_txt_open_badge,
                        0x001A73E8u, sx(66u));
         row_y += row_h + gap;
     }
@@ -2797,7 +2812,7 @@ static void shell_default_window_rect(u8 type, i32 *x, i32 *y, u32 *w, u32 *h)
         *x = (i32) sx(180u);
         *y = (i32) sy(120u);
         *w = sx(620u);
-        *h = sy(680u);
+        *h = sy(220u);
     } else if (type == SHELL_WIN_NET) {
         *x = (i32) sx(72u);
         *y = (i32) sy(70u);
@@ -3025,9 +3040,10 @@ static void shell_draw_start_menu(void)
     }
 
     u32 row_y = y + shellm.menu_header_h;
-    for (u8 i = 0u; i < SHELL_APP_COUNT; i += 1u) {
-        shell_draw_start_menu_row(x, row_y, w, shellm.menu_row_h, shell_apps[i].icon,
-                                  shell_apps[i].name, i == 0u);
+    for (u8 i = 0u; i < SHELL_APP_START_COUNT; i += 1u) {
+        const struct ShellApp *app = &shell_apps[shell_start_app_ids[i]];
+        shell_draw_start_menu_row(x, row_y, w, shellm.menu_row_h, app->icon,
+                                  app->name, i == 0u);
         row_y += shellm.menu_row_h;
     }
 }
@@ -3091,8 +3107,8 @@ static u8 shell_launch_from_menu(i32 mx, i32 my)
         return 0;
     }
     u32 row = (u32) rel / shellm.menu_row_h;
-    if (row < SHELL_APP_COUNT) {
-        return shell_launch_app(shell_apps[row].id);
+    if (row < SHELL_APP_START_COUNT) {
+        return shell_launch_app(shell_start_app_ids[row]);
     }
     return 0;
 }
@@ -3141,7 +3157,7 @@ static void shell_click_apps(u8 win_index, i32 mx, i32 my)
     if (row == 0xFFu) {
         return;
     }
-    shell_launch_app(shell_apps[row].id);
+    shell_launch_app(shell_program_app_ids[row]);
     dirty = 1;
 }
 
@@ -3617,7 +3633,7 @@ static void shell_keyboard(u8 scancode)
         return;
     }
     if (scancode == 0x57u) {
-        shell_launch_app(SHELL_APP_NET);
+        shell_launch_app(SHELL_APP_NETSURF);
         return;
     }
     if (scancode == 0x42u) {

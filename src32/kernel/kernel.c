@@ -10709,12 +10709,11 @@ static void net_browser_open_port_status_page(void)
         "<h1>LeonOS Browser</h1>"
         "<div class=\"card\"><p>This is the real LeonOS HTTPS browser: TLS, HTML, "
         "layout, forms, images, navigation, and an honest strict NOJS mode.</p>"
-        "<p class=\"note\">Upstream NetSurf is not running yet. The NetSurf port track "
-        "adds ring-3 C apps and a launcher; full NetSurf still needs user libc, heap, "
-        "files, sockets, and a framebuffer frontend.</p></div>"
-        "<div class=\"card\"><p>Launch from Programs: <strong>LeonOS Browser</strong>, "
-        "press <strong>B</strong> for UBROWSER.LEO, or <strong>F11</strong> for the "
-        "built-in browser window.</p>"
+        "<p class=\"note\">Programs now exposes one Browser app. It launches the "
+        "NetSurf-backed ring-3 browser path, while this kernel browser remains as "
+        "the built-in status and fallback view.</p></div>"
+        "<div class=\"card\"><p>Launch <strong>Browser</strong> from Programs or "
+        "press <strong>F11</strong> to start the unified browser app.</p>"
         "<p>Try a real page: https://www.example.com/</p></div>"
         "</body></html>";
 
