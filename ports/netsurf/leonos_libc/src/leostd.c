@@ -338,6 +338,9 @@ static void leonos_focus_url_edit(void)
     leonos_url_edit_len = 0u;
     leonos_write_stdout("NETSURF URL EDIT FOCUS\r\n");
     leonos_draw_url_edit();
+    if (!leonos_pending_stdin_ready) {
+        leonos_queue_stdin_line("WINDOW STOP 0\n");
+    }
 }
 
 static void leonos_blur_url_edit(void)
@@ -357,6 +360,9 @@ static void leonos_submit_url_edit(void)
     } else {
         snprintf(target, sizeof(target), "https://%s", leonos_url_edit);
     }
+    leonos_write_stdout("NETSURF URL EDIT SUBMIT ");
+    leonos_write_stdout(target);
+    leonos_write_stdout("\r\n");
     leonos_blur_url_edit();
     leonos_queue_stdin_line("WINDOW GO 0 %s\n", target);
 }
@@ -553,6 +559,51 @@ static void leonos_prepare_interactive_stdin(void)
     }
 }
 #endif
+
+int leonos_netsurf_overlay_handle_event(unsigned int type,
+                                        unsigned int data0,
+                                        unsigned int data1)
+{
+#if LEONOS_NETSURF_INTERACTIVE
+    if (type == LEONOS_EVENT_KEYBOARD) {
+        if (leonos_url_editing || leonos_url_edit_capture) {
+            return leonos_try_keyboard_event(data0);
+        }
+        if ((data0 & 0x80u) == 0u && data0 == 0x40u) {
+            leonos_focus_url_edit();
+            return 1;
+        }
+        return 0;
+    }
+
+    if (type == LEONOS_EVENT_MOUSE_BUTTON) {
+        unsigned int packed = data1;
+        unsigned int buttons = (packed >> 16) & 0xffu;
+        unsigned int previous = (packed >> 24) & 0xffu;
+        unsigned int y = packed & 0xffffu;
+
+        if ((buttons & 1u) != 0u && (previous & 1u) == 0u) {
+            if (y >= 20u && y < 56u && data0 >= 108u) {
+                leonos_focus_url_edit();
+                return 1;
+            }
+            if (leonos_url_editing || leonos_url_edit_capture) {
+                leonos_blur_url_edit();
+            }
+        }
+        return 0;
+    }
+
+    if (type == LEONOS_EVENT_MOUSE && data1 < LEONOS_NETSURF_VIEW_Y) {
+        return 1;
+    }
+#else
+    (void) type;
+    (void) data0;
+    (void) data1;
+#endif
+    return 0;
+}
 
 static int leonos_stdin_script_ready(void)
 {

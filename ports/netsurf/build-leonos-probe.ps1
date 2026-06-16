@@ -3638,6 +3638,9 @@ monkey_window_handle_command(int argc, char **argv)
         $OldCommandBlock = $OldCommandBlock -replace "`r`n", "`n"
         $NewLeonOsEventBlock = @'
 #ifdef WITH_LEONOS_FETCHER
+extern int leonos_netsurf_overlay_handle_event(unsigned int type,
+		unsigned int data0, unsigned int data1) __attribute__((weak));
+
 static uint32_t
 leonos_scancode_to_netsurf_key(unsigned int scancode)
 {
@@ -3734,6 +3737,11 @@ monkey_window_process_leonos_event(unsigned int type,
 		return;
 	}
 
+	if (leonos_netsurf_overlay_handle_event != NULL &&
+	    leonos_netsurf_overlay_handle_event(type, data0, data1)) {
+		return;
+	}
+
 	if (type == LEONOS_EVENT_MOUSE) {
 		if (!leonos_window_translate_point(data0, data1, &x, &y)) {
 			return;
@@ -3783,6 +3791,51 @@ monkey_window_handle_command(int argc, char **argv)
             throw "Could not patch NetSurf monkey browser LeonOS event handler."
         }
         $BrowserText = $BrowserText.Replace($OldCommandBlock, $NewLeonOsEventBlock)
+    }
+    if ($BrowserText -notmatch 'leonos_netsurf_overlay_handle_event') {
+        $OldOverlayExtern = @'
+#ifdef WITH_LEONOS_FETCHER
+static uint32_t
+'@
+        $OldOverlayExtern = $OldOverlayExtern -replace "`r`n", "`n"
+        $NewOverlayExtern = @'
+#ifdef WITH_LEONOS_FETCHER
+extern int leonos_netsurf_overlay_handle_event(unsigned int type,
+		unsigned int data0, unsigned int data1) __attribute__((weak));
+
+static uint32_t
+'@
+        $NewOverlayExtern = $NewOverlayExtern -replace "`r`n", "`n"
+        if (-not $BrowserText.Contains($OldOverlayExtern)) {
+            throw "Could not patch NetSurf monkey browser overlay declaration."
+        }
+        $BrowserText = $BrowserText.Replace($OldOverlayExtern, $NewOverlayExtern)
+
+        $OldOverlayCall = @'
+	if (gw == NULL) {
+		return;
+	}
+
+	if (type == LEONOS_EVENT_MOUSE) {
+'@
+        $OldOverlayCall = $OldOverlayCall -replace "`r`n", "`n"
+        $NewOverlayCall = @'
+	if (gw == NULL) {
+		return;
+	}
+
+	if (leonos_netsurf_overlay_handle_event != NULL &&
+	    leonos_netsurf_overlay_handle_event(type, data0, data1)) {
+		return;
+	}
+
+	if (type == LEONOS_EVENT_MOUSE) {
+'@
+        $NewOverlayCall = $NewOverlayCall -replace "`r`n", "`n"
+        if (-not $BrowserText.Contains($OldOverlayCall)) {
+            throw "Could not patch NetSurf monkey browser overlay event hook."
+        }
+        $BrowserText = $BrowserText.Replace($OldOverlayCall, $NewOverlayCall)
     }
     $BrowserText = $BrowserText.Replace(
         "case 0x1c: return NS_KEY_CR;",
