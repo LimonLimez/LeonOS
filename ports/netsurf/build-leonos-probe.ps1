@@ -414,6 +414,39 @@ function Ensure-LibDomInstalledHeaders {
     }
 }
 
+function Ensure-LibDomLeonOsSourcePatches {
+    $ParserSource = Join-Path $VendorPath "libdom\bindings\hubbub\parser.c"
+    if (-not (Test-Path -LiteralPath $ParserSource)) {
+        throw "libdom Hubbub parser source missing at $ParserSource."
+    }
+
+    $ParserText = [System.IO.File]::ReadAllText($ParserSource) -replace "`r`n", "`n"
+    if ($ParserText -notmatch 'parser == NULL \|\| parser->parser == NULL') {
+        $OldParseChunk = @'
+{
+	hubbub_error err;
+
+	err = hubbub_parser_parse_chunk(parser->parser, data, len);
+'@
+        $OldParseChunk = $OldParseChunk -replace "`r`n", "`n"
+        $NewParseChunk = @'
+{
+	hubbub_error err;
+
+	if (parser == NULL || parser->parser == NULL)
+		return DOM_HUBBUB_BADPARM;
+
+	err = hubbub_parser_parse_chunk(parser->parser, data, len);
+'@
+        $NewParseChunk = $NewParseChunk -replace "`r`n", "`n"
+        if (-not $ParserText.Contains($OldParseChunk)) {
+            throw "Could not patch libdom Hubbub parser null guard."
+        }
+        $ParserText = $ParserText.Replace($OldParseChunk, $NewParseChunk)
+        [System.IO.File]::WriteAllText($ParserSource, $ParserText, [System.Text.Encoding]::ASCII)
+    }
+}
+
 function Ensure-LibSvgTinyGeneratedFiles {
     $SvgRoot = Join-Path $VendorPath "libsvgtiny"
     $ColorsGperf = Join-Path $SvgRoot "src\colors.gperf"
@@ -4716,6 +4749,9 @@ if ($Libraries -contains "libhubbub") {
 }
 if (($Libraries -contains "libdom") -or ($Libraries -contains "libsvgtiny")) {
     Ensure-LibDomInstalledHeaders
+}
+if ($Libraries -contains "libdom") {
+    Ensure-LibDomLeonOsSourcePatches
 }
 if ($Libraries -contains "libsvgtiny") {
     Ensure-LibSvgTinyGeneratedFiles
