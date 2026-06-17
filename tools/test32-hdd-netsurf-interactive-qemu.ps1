@@ -134,7 +134,7 @@ try {
         Start-Sleep -Milliseconds 25
     }
     Start-Sleep -Milliseconds 250
-    Move-QemuMouseTo $Writer 220 38 -Step 32 `
+    Move-QemuMouseTo $Writer 294 150 -Step 32 `
         -FromX 0 -FromY 0
     Start-Sleep -Milliseconds 200
     Send-LeonOsMonitorLine $Writer $Stream "mouse_button 0x01"

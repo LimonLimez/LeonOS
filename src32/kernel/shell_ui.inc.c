@@ -2596,6 +2596,55 @@ static void shell_draw_window(u8 index)
     shell_draw_window_body(index);
 }
 
+static void shell_draw_start_menu(void);
+static void shell_draw_taskbar(void);
+
+static void shell_draw_window_frame_only(u8 index)
+{
+    struct ShellWin *win = &shell_wins[index];
+    if (!win->used ||
+        (win->flags & SHELL_WF_VISIBLE) == 0 ||
+        (win->flags & SHELL_WF_MINIMIZED) != 0) {
+        return;
+    }
+
+    u32 x = (u32) win->x;
+    u32 y = (u32) win->y;
+    u32 w = win->w;
+    u32 h = win->h;
+    shell_draw_titlebar(win, shell_focus_idx == index);
+    if (w > 8u && h > shellm.title_h + 8u) {
+        fill_rect(x + 5u, y + h - 2u, w - 2u, 4u, SHELL_COL_SHADOW);
+        fill_rect(x + w - 2u, y + shellm.title_h + 5u, 4u,
+                  h - shellm.title_h - 5u, SHELL_COL_SHADOW);
+    }
+    fill_rect(x, y + h - 2u, w, 2u, 0x00AAB8C7u);
+    fill_rect(x, y, 2u, h, SHELL_COL_BORDER);
+    fill_rect(x + w - 2u, y, 2u, h, 0x00AAB8C7u);
+}
+
+static void shell_draw_netsurf_overlay_chrome(void)
+{
+    u8 saw_net = 0u;
+    for (u8 zi = 0u; zi < shell_z_count; zi += 1u) {
+        u8 wi = shell_z[zi];
+        struct ShellWin *win = &shell_wins[wi];
+        if (!win->used ||
+            (win->flags & SHELL_WF_VISIBLE) == 0 ||
+            (win->flags & SHELL_WF_MINIMIZED) != 0) {
+            continue;
+        }
+        if (win->type == SHELL_WIN_NET) {
+            shell_draw_window_frame_only(wi);
+            saw_net = 1u;
+        } else if (saw_net) {
+            shell_draw_window(wi);
+        }
+    }
+    shell_draw_start_menu();
+    shell_draw_taskbar();
+}
+
 static void shell_wallpaper(void)
 {
     u32 height = g_boot->framebuffer.height;
@@ -3457,6 +3506,63 @@ static void shell_mouse_click(void)
             shell_click_tabs(wi, mouse_x, mouse_y);
             shell_click_files(wi, mouse_x, mouse_y);
             shell_click_apps(wi, mouse_x, mouse_y);
+            return;
+        }
+    }
+}
+
+static void shell_mouse_click_chrome_only(void)
+{
+    u8 pressed = (u8) (mouse_buttons & ~prev_mouse_buttons);
+    if ((pressed & 0x01u) == 0) {
+        return;
+    }
+
+    if (shell_launch_from_menu(mouse_x, mouse_y)) {
+        shell_start_open = 0;
+        dirty = 1;
+        return;
+    }
+
+    shell_click_taskbar(mouse_x, mouse_y);
+    if (shell_start_open && mouse_y < (i32) shellm.taskbar_y) {
+        shell_start_open = 0;
+        dirty = 1;
+    }
+
+    for (i32 zi = (i32) shell_z_count - 1; zi >= 0; zi -= 1) {
+        u8 wi = shell_z[(u8) zi];
+        struct ShellWin *win = &shell_wins[wi];
+        if (!win->used ||
+            (win->flags & SHELL_WF_VISIBLE) == 0 ||
+            (win->flags & SHELL_WF_MINIMIZED) != 0) {
+            continue;
+        }
+        u8 btn;
+        if (shell_hit_title_btn(wi, mouse_x, mouse_y, &btn)) {
+            shell_focus(wi);
+            if (btn == 0) {
+                shell_minimize(wi);
+            } else if (btn == 1) {
+                shell_apply_maximize(wi);
+            } else {
+                shell_close(wi);
+            }
+            return;
+        }
+        if (shell_point_in(mouse_x, mouse_y, win->x, win->y, win->w,
+                           shellm.title_h)) {
+            shell_focus(wi);
+            shell_dragging = 1;
+            shell_drag_win = wi;
+            shell_drag_moved = 0;
+            shell_drag_off_x = mouse_x - win->x;
+            shell_drag_off_y = mouse_y - win->y;
+            return;
+        }
+        if (shell_point_in(mouse_x, mouse_y, win->x, win->y,
+                           win->w, win->h)) {
+            shell_focus(wi);
             return;
         }
     }

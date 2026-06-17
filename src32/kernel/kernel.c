@@ -1597,7 +1597,11 @@ static u8 find_loaded_file(const char *display_name, u32 *out_cluster, u32 *out_
 
 static void restore_cursor(void);
 static void draw_cursor_overlay(void);
-static u32 user_fb_clip_limit_y(void);
+static u8 user_fb_netsurf_client_rect(i32 *out_x, i32 *out_y,
+                                      u32 *out_w, u32 *out_h);
+static u8 user_fb_map_rect(u32 *x, u32 *y, u32 *w, u32 *h);
+static u8 user_fb_map_text_point(u32 *x, u32 *y);
+static void user_event_map_netsurf(struct KernelEvent *event);
 static void user_fb_present_overlay(void);
 
 /* --- ATA PIO (primary master) read-only driver -------------------------- */
@@ -2524,18 +2528,37 @@ static u8 user_syscall_fb_info(u32 user_ptr)
         return 0u;
     }
 
+    u32 fb_w = g_boot->framebuffer.width;
+    u32 fb_h = g_boot->framebuffer.height;
+    u32 fb_pitch = g_boot->framebuffer.pitch;
+    if (user_app_netsurf_running) {
+        i32 cx;
+        i32 cy;
+        u32 cw;
+        u32 ch;
+        if (user_fb_netsurf_client_rect(&cx, &cy, &cw, &ch)) {
+            fb_w = cw;
+            fb_h = ch;
+            fb_pitch = cw * 4u;
+        } else {
+            fb_w = 1u;
+            fb_h = 1u;
+            fb_pitch = 4u;
+        }
+    }
+
     u32 *out = (u32 *) user_ptr;
-    out[0] = g_boot->framebuffer.width;
-    out[1] = g_boot->framebuffer.height;
-    out[2] = g_boot->framebuffer.pitch;
+    out[0] = fb_w;
+    out[1] = fb_h;
+    out[2] = fb_pitch;
     out[3] = 32u;
 
     if (!user_fb_info_reported) {
         user_fb_info_reported = 1u;
         serial_print(msg_user_fb_info);
-        serial_print_dec(g_boot->framebuffer.width);
+        serial_print_dec(fb_w);
         serial_write('x');
-        serial_print_dec(g_boot->framebuffer.height);
+        serial_print_dec(fb_h);
         serial_write('\r');
         serial_write('\n');
     }
@@ -2547,14 +2570,7 @@ static u8 user_syscall_fb_fill(u32 x, u32 y, u32 w, u32 h, u32 color)
     if (g_boot->framebuffer.address == 0 || w == 0u || h == 0u) {
         return 0u;
     }
-    u32 limit_y = user_fb_clip_limit_y();
-    if (y >= limit_y) {
-        return 1u;
-    }
-    if (h > limit_y - y) {
-        h = limit_y - y;
-    }
-    if (h == 0u) {
+    if (!user_fb_map_rect(&x, &y, &w, &h)) {
         return 1u;
     }
 
@@ -2617,8 +2633,7 @@ static u8 user_syscall_fb_text(u32 x, u32 y, u32 text_ptr, u32 color)
             text[sizeof(text) - 1u] = 0;
         }
     }
-    u32 limit_y = user_fb_clip_limit_y();
-    if (y >= limit_y || gui_line_height() > limit_y - y) {
+    if (!user_fb_map_text_point(&x, &y)) {
         return 1u;
     }
 
@@ -2690,24 +2705,7 @@ static u8 user_syscall_fb_blit(u32 desc_ptr)
         src_clip_height = src_height - src_y;
     }
 
-    if (dst_x >= g_boot->framebuffer.width ||
-        dst_y >= g_boot->framebuffer.height) {
-        return 1u;
-    }
-    if (width > g_boot->framebuffer.width - dst_x) {
-        width = g_boot->framebuffer.width - dst_x;
-    }
-    if (height > g_boot->framebuffer.height - dst_y) {
-        height = g_boot->framebuffer.height - dst_y;
-    }
-    u32 limit_y = user_fb_clip_limit_y();
-    if (dst_y >= limit_y) {
-        return 1u;
-    }
-    if (height > limit_y - dst_y) {
-        height = limit_y - dst_y;
-    }
-    if (height == 0u) {
+    if (!user_fb_map_rect(&dst_x, &dst_y, &width, &height)) {
         return 1u;
     }
 
@@ -2775,6 +2773,9 @@ static u8 user_syscall_event_poll(u32 user_ptr)
     struct KernelEvent event;
     if (!event_pop(&event)) {
         return 0u;
+    }
+    if (user_app_netsurf_running) {
+        user_event_map_netsurf(&event);
     }
 
     u32 *out = (u32 *) user_ptr;
@@ -13144,13 +13145,159 @@ static void shell_serial_emit(enum ShellSerialMsg msg)
 
 #include "shell_ui.inc.c"
 
-static u32 user_fb_clip_limit_y(void)
+static u8 user_fb_netsurf_client_rect(i32 *out_x, i32 *out_y,
+                                      u32 *out_w, u32 *out_h)
 {
-    if (user_app_netsurf_running && shellm.taskbar_y > 0u &&
-        shellm.taskbar_y < g_boot->framebuffer.height) {
-        return shellm.taskbar_y;
+    for (u8 zi = 0u; zi < shell_z_count; zi += 1u) {
+        u8 wi = shell_z[zi];
+        struct ShellWin *win = &shell_wins[wi];
+        if (!win->used || win->type != SHELL_WIN_NET ||
+            (win->flags & SHELL_WF_VISIBLE) == 0 ||
+            (win->flags & SHELL_WF_MINIMIZED) != 0) {
+            continue;
+        }
+
+        i32 x = win->x + 2;
+        i32 y = win->y + (i32) shellm.title_h;
+        u32 w = win->w > 4u ? win->w - 4u : win->w;
+        u32 h = win->h > shellm.title_h + 4u
+            ? win->h - shellm.title_h - 4u
+            : 0u;
+        if (h == 0u || w == 0u) {
+            return 0u;
+        }
+
+        if (x < 0) {
+            u32 trim = (u32) -x;
+            if (trim >= w) {
+                return 0u;
+            }
+            w -= trim;
+            x = 0;
+        }
+        if (y < 0) {
+            u32 trim = (u32) -y;
+            if (trim >= h) {
+                return 0u;
+            }
+            h -= trim;
+            y = 0;
+        }
+        if ((u32) x >= g_boot->framebuffer.width ||
+            (u32) y >= g_boot->framebuffer.height) {
+            return 0u;
+        }
+        if (w > g_boot->framebuffer.width - (u32) x) {
+            w = g_boot->framebuffer.width - (u32) x;
+        }
+        u32 limit_y = g_boot->framebuffer.height;
+        if (shellm.taskbar_y > 0u && shellm.taskbar_y < limit_y) {
+            limit_y = shellm.taskbar_y;
+        }
+        if ((u32) y >= limit_y) {
+            return 0u;
+        }
+        if (h > limit_y - (u32) y) {
+            h = limit_y - (u32) y;
+        }
+        if (w == 0u || h == 0u) {
+            return 0u;
+        }
+
+        *out_x = x;
+        *out_y = y;
+        *out_w = w;
+        *out_h = h;
+        return 1u;
     }
-    return g_boot->framebuffer.height;
+    return 0u;
+}
+
+static u8 user_fb_map_rect(u32 *x, u32 *y, u32 *w, u32 *h)
+{
+    if (*w == 0u || *h == 0u) {
+        return 0u;
+    }
+
+    if (user_app_netsurf_running) {
+        i32 client_x;
+        i32 client_y;
+        u32 client_w;
+        u32 client_h;
+        if (!user_fb_netsurf_client_rect(&client_x, &client_y,
+                                         &client_w, &client_h)) {
+            return 0u;
+        }
+        if (*x >= client_w || *y >= client_h) {
+            return 0u;
+        }
+        if (*w > client_w - *x) {
+            *w = client_w - *x;
+        }
+        if (*h > client_h - *y) {
+            *h = client_h - *y;
+        }
+        *x = (u32) client_x + *x;
+        *y = (u32) client_y + *y;
+        return *w != 0u && *h != 0u;
+    }
+
+    if (*x >= g_boot->framebuffer.width ||
+        *y >= g_boot->framebuffer.height) {
+        return 0u;
+    }
+    if (*w > g_boot->framebuffer.width - *x) {
+        *w = g_boot->framebuffer.width - *x;
+    }
+    if (*h > g_boot->framebuffer.height - *y) {
+        *h = g_boot->framebuffer.height - *y;
+    }
+    return *w != 0u && *h != 0u;
+}
+
+static u8 user_fb_map_text_point(u32 *x, u32 *y)
+{
+    u32 w = 1u;
+    u32 h = gui_line_height();
+    return user_fb_map_rect(x, y, &w, &h);
+}
+
+static void user_event_map_netsurf(struct KernelEvent *event)
+{
+    if (event->type != EVENT_MOUSE && event->type != EVENT_MOUSE_BUTTON) {
+        return;
+    }
+
+    i32 client_x;
+    i32 client_y;
+    u32 client_w;
+    u32 client_h;
+    if (!user_fb_netsurf_client_rect(&client_x, &client_y,
+                                     &client_w, &client_h)) {
+        event->data0 = 0u;
+        event->data1 = 0u;
+        return;
+    }
+
+    u32 raw_x = event->data0;
+    u32 raw_y = event->type == EVENT_MOUSE_BUTTON
+        ? (event->data1 & 0xFFFFu)
+        : event->data1;
+    u32 out_x = client_w + 1024u;
+    u32 out_y = client_h + 1024u;
+    if (raw_x >= (u32) client_x && raw_y >= (u32) client_y &&
+        raw_x < (u32) client_x + client_w &&
+        raw_y < (u32) client_y + client_h) {
+        out_x = raw_x - (u32) client_x;
+        out_y = raw_y - (u32) client_y;
+    }
+
+    event->data0 = out_x;
+    if (event->type == EVENT_MOUSE_BUTTON) {
+        event->data1 = (event->data1 & 0xFFFF0000u) | (out_y & 0xFFFFu);
+    } else {
+        event->data1 = out_y;
+    }
 }
 
 static void user_fb_present_overlay(void)
@@ -13164,7 +13311,7 @@ static void user_fb_present_overlay(void)
         u32 old_stride = draw_stride_override;
         draw_pixels_override = framebuffer_back;
         draw_stride_override = framebuffer_back_stride;
-        shell_draw_taskbar();
+        shell_draw_netsurf_overlay_chrome();
         draw_pixels_override = old_pixels;
         draw_stride_override = old_stride;
     }
@@ -13212,13 +13359,27 @@ static void handle_mouse_packet(void)
         mouse_y = max_y;
     }
 
-    if (!(user_app_running && user_fb_overlay_active)) {
+    u8 user_overlay_input = user_app_running && user_fb_overlay_active;
+    u8 event_prev_buttons = prev_mouse_buttons;
+    if (!user_overlay_input) {
         shell_mouse_move();
         shell_mouse_click();
         shell_mouse_release();
+    } else if (user_app_netsurf_running) {
+        shell_mouse_move();
+        shell_mouse_click_chrome_only();
+        shell_mouse_release();
     }
     event_push(EVENT_MOUSE, (u32) mouse_x, (u32) mouse_y);
-    if (mouse_buttons != prev_mouse_buttons) {
+    if (user_overlay_input) {
+        if (mouse_buttons != event_prev_buttons) {
+            event_push(EVENT_MOUSE_BUTTON, (u32) mouse_x,
+                       ((u32) mouse_y & 0xFFFFu) |
+                       ((u32) mouse_buttons << 16) |
+                       ((u32) event_prev_buttons << 24));
+        }
+        prev_mouse_buttons = mouse_buttons;
+    } else if (mouse_buttons != prev_mouse_buttons) {
         event_push(EVENT_MOUSE_BUTTON, (u32) mouse_x,
                    ((u32) mouse_y & 0xFFFFu) |
                    ((u32) mouse_buttons << 16) |
