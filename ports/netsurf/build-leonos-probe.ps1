@@ -2239,14 +2239,19 @@ static bool leonos_html_focus_first_text_input(html_content *html)
 			    html->leonos_dom_rebuild_count <
 				    LEONOS_DOM_REBUILD_LIMIT) {
 				nserror error;
-				html->leonos_dom_mutation_dirty = false;
-				error = html_leonos_rebuild_dom_to_box(html);
-				if (error == NSERROR_OK) {
-					leonos_html_log("HTML LEONOS DOM REBUILD START\r\n");
-					return NSERROR_OK;
+				if (html->box_conversion_context == NULL) {
+					html->leonos_dom_mutation_dirty = false;
+					error = html_leonos_rebuild_dom_to_box(html);
+					if (error == NSERROR_OK) {
+						leonos_html_log("HTML LEONOS DOM REBUILD START\r\n");
+						return NSERROR_OK;
+					}
+					leonos_html_log_u("HTML LEONOS DOM REBUILD ERROR ",
+							(unsigned int) error);
+				} else {
+					html->leonos_dom_reflow_pending = true;
+					leonos_html_log("HTML LEONOS DOM REBUILD DEFER CONVERT\r\n");
 				}
-				leonos_html_log_u("HTML LEONOS DOM REBUILD ERROR ",
-						(unsigned int) error);
 			}
 			content_set_done(&html->base);
 			return NSERROR_OK;
@@ -2282,6 +2287,50 @@ static bool leonos_html_focus_first_text_input(html_content *html)
             throw "Could not patch NetSurf LeonOS DOM rebuild layout lifetime."
         }
         $HtmlText = $HtmlText.Replace($OldLeonOsRebuildFree, $NewLeonOsRebuildFree)
+        [System.IO.File]::WriteAllText($HtmlSource, $HtmlText, [System.Text.Encoding]::ASCII)
+    }
+    if ($HtmlText -notmatch 'HTML LEONOS DOM REBUILD DEFER CONVERT') {
+        $OldLeonOsProceedDoneLive = @'
+			if (html->leonos_dom_mutation_dirty &&
+			    html->leonos_dom_rebuild_count <
+				    LEONOS_DOM_REBUILD_LIMIT) {
+				nserror error;
+				html->leonos_dom_mutation_dirty = false;
+				error = html_leonos_rebuild_dom_to_box(html);
+				if (error == NSERROR_OK) {
+					leonos_html_log("HTML LEONOS DOM REBUILD START\r\n");
+					return NSERROR_OK;
+				}
+				leonos_html_log_u("HTML LEONOS DOM REBUILD ERROR ",
+						(unsigned int) error);
+			}
+'@
+        $OldLeonOsProceedDoneLive = $OldLeonOsProceedDoneLive -replace "`r`n", "`n"
+        $NewLeonOsProceedDoneLive = @'
+			if (html->leonos_dom_mutation_dirty &&
+			    html->leonos_dom_rebuild_count <
+				    LEONOS_DOM_REBUILD_LIMIT) {
+				nserror error;
+				if (html->box_conversion_context == NULL) {
+					html->leonos_dom_mutation_dirty = false;
+					error = html_leonos_rebuild_dom_to_box(html);
+					if (error == NSERROR_OK) {
+						leonos_html_log("HTML LEONOS DOM REBUILD START\r\n");
+						return NSERROR_OK;
+					}
+					leonos_html_log_u("HTML LEONOS DOM REBUILD ERROR ",
+							(unsigned int) error);
+				} else {
+					html->leonos_dom_reflow_pending = true;
+					leonos_html_log("HTML LEONOS DOM REBUILD DEFER CONVERT\r\n");
+				}
+			}
+'@
+        $NewLeonOsProceedDoneLive = $NewLeonOsProceedDoneLive -replace "`r`n", "`n"
+        if (-not $HtmlText.Contains($OldLeonOsProceedDoneLive)) {
+            throw "Could not upgrade NetSurf LeonOS DOM rebuild proceed-to-done hook."
+        }
+        $HtmlText = $HtmlText.Replace($OldLeonOsProceedDoneLive, $NewLeonOsProceedDoneLive)
         [System.IO.File]::WriteAllText($HtmlSource, $HtmlText, [System.Text.Encoding]::ASCII)
     }
 
@@ -2801,7 +2850,7 @@ bool html_redraw_box(const html_content *html, struct box *box,
         $NewRedrawGuard = @'
 	box = html->layout;
 #ifdef LEONOS_USER_APP
-	if (box == NULL || html->box_conversion_context != NULL) {
+	if (box == NULL) {
 		leonos_write("HTML REDRAW DEFER NO LAYOUT\r\n");
 		return true;
 	}
@@ -2822,6 +2871,45 @@ bool html_redraw_box(const html_content *html, struct box *box,
         } else {
             throw "Could not patch NetSurf LeonOS redraw conversion guard."
         }
+    }
+    if ($RedrawText -match 'html->box_conversion_context != NULL') {
+        $OldRedrawGuardLive = @'
+#ifdef LEONOS_USER_APP
+	if (box == NULL || html->box_conversion_context != NULL) {
+		leonos_write("HTML REDRAW DEFER NO LAYOUT\r\n");
+		return true;
+	}
+#endif
+'@
+        $OldRedrawGuardLive = $OldRedrawGuardLive -replace "`r`n", "`n"
+        $OldRedrawGuardLiveRebuild = @'
+#ifdef LEONOS_USER_APP
+	if (box == NULL ||
+	    (html->box_conversion_context != NULL &&
+	     !html->leonos_dom_rebuild_active)) {
+		leonos_write("HTML REDRAW DEFER NO LAYOUT\r\n");
+		return true;
+	}
+#endif
+'@
+        $OldRedrawGuardLiveRebuild = $OldRedrawGuardLiveRebuild -replace "`r`n", "`n"
+        $NewRedrawGuardLive = @'
+#ifdef LEONOS_USER_APP
+	if (box == NULL) {
+		leonos_write("HTML REDRAW DEFER NO LAYOUT\r\n");
+		return true;
+	}
+#endif
+'@
+        $NewRedrawGuardLive = $NewRedrawGuardLive -replace "`r`n", "`n"
+        if ($RedrawText.Contains($OldRedrawGuardLiveRebuild)) {
+            $RedrawText = $RedrawText.Replace($OldRedrawGuardLiveRebuild, $NewRedrawGuardLive)
+        } elseif ($RedrawText.Contains($OldRedrawGuardLive)) {
+            $RedrawText = $RedrawText.Replace($OldRedrawGuardLive, $NewRedrawGuardLive)
+        } else {
+            throw "Could not upgrade NetSurf LeonOS redraw conversion guard."
+        }
+        $RedrawChanged = $true
     }
     if ($RedrawText -notmatch 'leonos_redraw_clamp_i64') {
         $OldRedrawAssertInclude = @'
