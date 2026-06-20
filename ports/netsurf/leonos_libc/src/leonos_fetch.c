@@ -1515,6 +1515,9 @@ static unsigned int leonos_fetch_priority(
             return begun ? 944u : 943u;
         }
         if (leonos_fetch_url_is_roblox_react_landing_route_script(url)) {
+            if (leonos_fetch_roblox_delivery_dependencies_ready(url)) {
+                return begun ? 996u : 995u;
+            }
             return begun ? 946u : 945u;
         }
         if (leonos_fetch_url_is_roblox_thumbnails_script(url)) {
