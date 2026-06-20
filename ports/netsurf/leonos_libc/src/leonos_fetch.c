@@ -1534,8 +1534,7 @@ static unsigned int leonos_fetch_priority(
         }
         return begun ? 740u : 730u;
     }
-    if (strstr(url, "rbxcdn.com/") != NULL &&
-        leonos_fetch_url_names_decodable_image(url)) {
+    if (leonos_fetch_url_names_decodable_image(url)) {
         return begun ? 938u : 937u;
     }
     return begun ? 260u : 250u;
