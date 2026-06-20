@@ -43,6 +43,7 @@ struct jsthread {
 	bool active_script_dom_budget_hit;
 	bool active_script_dom_native_budget_hit;
 	bool active_script_react_landing_attached;
+	bool selector_selftest_ran;
 	dom_node *active_script_react_landing_candidate;
 	bool closed;
 };
@@ -118,6 +119,7 @@ static uint32_t qjs_script_interrupt_limit(const jsheap *heap, size_t bytes,
 	     strstr(name, "CoreUtilities.") != NULL ||
 	     strstr(name, "Thumbnails.") != NULL ||
 	     strstr(name, "GameCarousel.") != NULL ||
+	     strstr(name, "ReactLanding.") != NULL ||
 	     strstr(name, "ReactStyleGuide.") != NULL ||
 	     strstr(name, "63b59480fef503ff6648900d1051bae7531757a38ce24f77587552fca279d16c") != NULL) &&
 	    limit < timeout * 5000u) {
@@ -3441,7 +3443,8 @@ struct qjs_simple_selector {
 };
 
 struct qjs_selector_chain {
-	struct qjs_simple_selector parts[4];
+	struct qjs_simple_selector parts[8];
+	char combinators[8];
 	unsigned int count;
 	bool unsupported;
 };
@@ -3755,14 +3758,17 @@ static bool qjs_parse_selector_chain(const char *text,
 	size_t end = 0u;
 	size_t part_start;
 	unsigned int bracket_depth = 0u;
+	unsigned int paren_depth = 0u;
 	char quote = 0;
+	char next_combinator = 0;
 	memset(chain, 0, sizeof(*chain));
 	while (start < len && qjs_ascii_space(text[start])) {
 		start += 1u;
 	}
 	end = start;
 	while (end < len &&
-	       (text[end] != ',' || bracket_depth != 0u || quote != 0)) {
+	       (text[end] != ',' || bracket_depth != 0u ||
+		paren_depth != 0u || quote != 0)) {
 		if (quote != 0) {
 			if (text[end] == quote) {
 				quote = 0;
@@ -3784,11 +3790,17 @@ static bool qjs_parse_selector_chain(const char *text,
 			end += 1u;
 			continue;
 		}
-		if (bracket_depth == 0u &&
-		    (text[end] == '>' || text[end] == '+' ||
-		     text[end] == '~')) {
-			chain->unsupported = true;
-			return false;
+		if (bracket_depth == 0u) {
+			if (text[end] == '(') {
+				paren_depth += 1u;
+				end += 1u;
+				continue;
+			}
+			if (text[end] == ')' && paren_depth != 0u) {
+				paren_depth -= 1u;
+				end += 1u;
+				continue;
+			}
 		}
 		end += 1u;
 	}
@@ -3800,11 +3812,33 @@ static bool qjs_parse_selector_chain(const char *text,
 		return false;
 	}
 	while (start < end) {
+		bool had_space = false;
 		while (start < end && qjs_ascii_space(text[start])) {
 			start += 1u;
+			had_space = true;
+		}
+		if (start < end &&
+		    (text[start] == '>' || text[start] == '+' ||
+		     text[start] == '~')) {
+			if (chain->count == 0u || next_combinator != 0) {
+				chain->unsupported = true;
+				return false;
+			}
+			next_combinator = text[start++];
+			while (start < end && qjs_ascii_space(text[start])) {
+				start += 1u;
+			}
+			if (start >= end) {
+				chain->unsupported = true;
+				return false;
+			}
+		} else if (had_space && chain->count != 0u &&
+			   next_combinator == 0) {
+			next_combinator = ' ';
 		}
 		part_start = start;
 		bracket_depth = 0u;
+		paren_depth = 0u;
 		quote = 0;
 		while (start < end) {
 			if (quote != 0) {
@@ -3828,17 +3862,37 @@ static bool qjs_parse_selector_chain(const char *text,
 				start += 1u;
 				continue;
 			}
-			if (bracket_depth == 0u && qjs_ascii_space(text[start])) {
-				break;
+			if (bracket_depth == 0u) {
+				if (text[start] == '(') {
+					paren_depth += 1u;
+					start += 1u;
+					continue;
+				}
+				if (text[start] == ')' && paren_depth != 0u) {
+					paren_depth -= 1u;
+					start += 1u;
+					continue;
+				}
+				if (paren_depth == 0u &&
+				    (qjs_ascii_space(text[start]) ||
+				     text[start] == '>' ||
+				     text[start] == '+' ||
+				     text[start] == '~')) {
+					break;
+				}
 			}
 			start += 1u;
 		}
 		if (part_start == start) {
 			continue;
 		}
-		if (chain->count >= 4u) {
+		if (chain->count >= 8u) {
 			chain->unsupported = true;
 			return false;
+		}
+		if (chain->count != 0u) {
+			chain->combinators[chain->count] =
+				next_combinator != 0 ? next_combinator : ' ';
 		}
 		if (!qjs_parse_selector_part(text, part_start, start,
 					     &chain->parts[chain->count])) {
@@ -3846,8 +3900,9 @@ static bool qjs_parse_selector_chain(const char *text,
 			return false;
 		}
 		chain->count += 1u;
+		next_combinator = 0;
 	}
-	if (chain->count == 0u) {
+	if (chain->count == 0u || next_combinator != 0) {
 		chain->unsupported = true;
 		return false;
 	}
@@ -4056,6 +4111,60 @@ static dom_node *qjs_find_matching_ancestor(dom_node *start,
 	return NULL;
 }
 
+static dom_node *qjs_find_matching_parent(dom_node *start,
+					  const struct qjs_simple_selector *selector)
+{
+	dom_node *parent = NULL;
+	dom_node_type type = DOM_NODE_TYPE_COUNT;
+	if (start == NULL || selector == NULL ||
+	    dom_node_get_parent_node(start, &parent) != DOM_NO_ERR ||
+	    parent == NULL) {
+		return NULL;
+	}
+	if (dom_node_get_node_type(parent, &type) == DOM_NO_ERR &&
+	    type == DOM_ELEMENT_NODE &&
+	    qjs_dom_element_matches((dom_element *) parent, selector)) {
+		return parent;
+	}
+	dom_node_unref(parent);
+	return NULL;
+}
+
+static dom_node *qjs_find_matching_previous_sibling(dom_node *start,
+		const struct qjs_simple_selector *selector,
+		bool adjacent_only)
+{
+	dom_node *cursor = NULL;
+	dom_node *previous = NULL;
+	if (start == NULL || selector == NULL ||
+	    dom_node_get_previous_sibling(start, &cursor) != DOM_NO_ERR) {
+		return NULL;
+	}
+	while (cursor != NULL) {
+		dom_node_type type = DOM_NODE_TYPE_COUNT;
+		if (dom_node_get_node_type(cursor, &type) == DOM_NO_ERR &&
+		    type == DOM_ELEMENT_NODE) {
+			if (qjs_dom_element_matches((dom_element *) cursor,
+						    selector)) {
+				return cursor;
+			}
+			if (adjacent_only) {
+				dom_node_unref(cursor);
+				return NULL;
+			}
+		}
+		if (dom_node_get_previous_sibling(cursor, &previous) !=
+		    DOM_NO_ERR) {
+			dom_node_unref(cursor);
+			return NULL;
+		}
+		dom_node_unref(cursor);
+		cursor = previous;
+		previous = NULL;
+	}
+	return NULL;
+}
+
 static bool qjs_dom_element_matches_chain(dom_element *element,
 					  const struct qjs_selector_chain *chain)
 {
@@ -4069,8 +4178,21 @@ static bool qjs_dom_element_matches_chain(dom_element *element,
 	}
 	scope = (dom_node *) element;
 	for (unsigned int part = chain->count - 1u; part > 0u; part--) {
-		dom_node *found = qjs_find_matching_ancestor(scope,
-			&chain->parts[part - 1u]);
+		char combinator = chain->combinators[part];
+		dom_node *found = NULL;
+		if (combinator == '>') {
+			found = qjs_find_matching_parent(scope,
+				&chain->parts[part - 1u]);
+		} else if (combinator == '+') {
+			found = qjs_find_matching_previous_sibling(scope,
+				&chain->parts[part - 1u], true);
+		} else if (combinator == '~') {
+			found = qjs_find_matching_previous_sibling(scope,
+				&chain->parts[part - 1u], false);
+		} else {
+			found = qjs_find_matching_ancestor(scope,
+				&chain->parts[part - 1u]);
+		}
 		if (owned_scope != NULL) {
 			dom_node_unref(owned_scope);
 			owned_scope = NULL;
@@ -4087,11 +4209,180 @@ static bool qjs_dom_element_matches_chain(dom_element *element,
 	return true;
 }
 
+static void qjs_append_matching_descendants(JSContext *ctx,
+					    JSValueConst list,
+					    dom_node *scope,
+					    const struct qjs_selector_chain *chain,
+					    uint32_t *visited,
+					    uint32_t *out_index)
+{
+	dom_node *child = NULL;
+	if (scope == NULL || chain == NULL || out_index == NULL ||
+	    *out_index >= 512u ||
+	    dom_node_get_first_child(scope, &child) != DOM_NO_ERR) {
+		return;
+	}
+	while (child != NULL && *out_index < 512u) {
+		dom_node *next = NULL;
+		dom_node_type type = DOM_NODE_TYPE_COUNT;
+		(void) dom_node_get_next_sibling(child, &next);
+		if (dom_node_get_node_type(child, &type) == DOM_NO_ERR &&
+		    type == DOM_ELEMENT_NODE) {
+			if (visited != NULL) {
+				*visited += 1u;
+			}
+			if (qjs_dom_element_matches_chain((dom_element *) child,
+							  chain)) {
+				JS_DefinePropertyValueUint32(ctx, list,
+					(*out_index)++,
+					qjs_new_dom_selector_result(ctx, child),
+					JS_PROP_C_W_E);
+			}
+		}
+		qjs_append_matching_descendants(ctx, list, child, chain,
+						visited, out_index);
+		dom_node_unref(child);
+		child = next;
+	}
+}
+
 static JSValue qjs_new_dom_node_array(JSContext *ctx)
 {
 	JSValue list = JS_NewArray(ctx);
 	qjs_install_function(ctx, list, "item", qjs_array_item, 1);
 	return list;
+}
+
+static size_t qjs_selector_find_group_end(const char *text,
+					  size_t start,
+					  size_t len)
+{
+	unsigned int bracket_depth = 0u;
+	unsigned int paren_depth = 0u;
+	char quote = 0;
+	for (size_t i = start; i < len; i++) {
+		if (quote != 0) {
+			if (text[i] == quote) {
+				quote = 0;
+			}
+			continue;
+		}
+		if (text[i] == '\'' || text[i] == '"') {
+			quote = text[i];
+			continue;
+		}
+		if (text[i] == '[') {
+			bracket_depth += 1u;
+			continue;
+		}
+		if (text[i] == ']' && bracket_depth != 0u) {
+			bracket_depth -= 1u;
+			continue;
+		}
+		if (bracket_depth == 0u) {
+			if (text[i] == '(') {
+				paren_depth += 1u;
+				continue;
+			}
+			if (text[i] == ')' && paren_depth != 0u) {
+				paren_depth -= 1u;
+				continue;
+			}
+			if (paren_depth == 0u && text[i] == ',') {
+				return i;
+			}
+		}
+	}
+	return len;
+}
+
+static bool qjs_selector_result_list_contains(JSContext *ctx,
+					      JSValueConst list,
+					      uint32_t length,
+					      JSValueConst candidate)
+{
+	struct qjs_native_node *candidate_native =
+		qjs_get_native_or_materialized_node(ctx, candidate);
+	for (uint32_t i = 0u; i < length; i++) {
+		JSValue item = JS_GetPropertyUint32(ctx, list, i);
+		bool same_js = JS_StrictEq(ctx, item, candidate);
+		bool same_dom = false;
+		if (!same_js && candidate_native != NULL &&
+		    candidate_native->node != NULL) {
+			struct qjs_native_node *item_native =
+				qjs_get_native_or_materialized_node(ctx, item);
+			if (item_native != NULL && item_native->node != NULL) {
+				(void) dom_node_is_same(candidate_native->node,
+							item_native->node,
+							&same_dom);
+			}
+		}
+		JS_FreeValue(ctx, item);
+		if (same_js || same_dom) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void qjs_append_selector_group_results(JSContext *ctx,
+					      JSValueConst this_val,
+					      JSValueConst list,
+					      uint32_t *out_index,
+					      const char *selector_text)
+{
+	size_t len = strlen(selector_text);
+	size_t start = 0u;
+	while (start < len && *out_index < 512u) {
+		size_t end;
+		size_t trimmed_start;
+		size_t trimmed_end;
+		JSValue group_arg;
+		JSValue group_list;
+		uint32_t group_length = 0u;
+		end = qjs_selector_find_group_end(selector_text, start, len);
+		trimmed_start = start;
+		trimmed_end = end;
+		while (trimmed_start < trimmed_end &&
+		       qjs_ascii_space(selector_text[trimmed_start])) {
+			trimmed_start += 1u;
+		}
+		while (trimmed_end > trimmed_start &&
+		       qjs_ascii_space(selector_text[trimmed_end - 1u])) {
+			trimmed_end -= 1u;
+		}
+		if (trimmed_start < trimmed_end) {
+			group_arg = JS_NewStringLen(ctx,
+				selector_text + trimmed_start,
+				trimmed_end - trimmed_start);
+			group_list = qjs_document_query_selector_all(ctx,
+				this_val, 1, &group_arg);
+			group_length = qjs_array_length(ctx, group_list);
+			for (uint32_t i = 0u;
+			     i < group_length && *out_index < 512u;
+			     i++) {
+				JSValue item =
+					JS_GetPropertyUint32(ctx,
+							     group_list,
+							     i);
+				if (!JS_IsUndefined(item) &&
+				    !qjs_selector_result_list_contains(ctx,
+						list, *out_index, item)) {
+					JS_DefinePropertyValueUint32(ctx,
+						list, (*out_index)++,
+						item, JS_PROP_C_W_E);
+				} else {
+					JS_FreeValue(ctx, item);
+				}
+			}
+			JS_FreeValue(ctx, group_list);
+			JS_FreeValue(ctx, group_arg);
+		}
+		if (end >= len) {
+			break;
+		}
+		start = end + 1u;
+	}
 }
 
 static JSValue qjs_new_roblox_account_experience_meta(JSContext *ctx)
@@ -4225,6 +4516,26 @@ static JSValue qjs_document_query_selector_all(JSContext *ctx,
 		JS_FreeCString(ctx, selector_text);
 		return list;
 	}
+	if (qjs_selector_find_group_end(selector_text, 0u,
+				       strlen(selector_text)) <
+	    strlen(selector_text)) {
+		uint32_t out_count = 0u;
+		qjs_append_selector_group_results(ctx, this_val, list,
+						  &out_count, selector_text);
+#ifdef LEONOS_USER_APP
+		{
+			char detail[128];
+			int detail_len = snprintf(detail, sizeof(detail),
+				"NETSURF QUICKJS QUERYALL %s nodes=selector-list count=%u\r\n",
+				selector_text, (unsigned int) out_count);
+			if (detail_len > 0) {
+				leonos_write(detail);
+			}
+		}
+#endif
+		JS_FreeCString(ctx, selector_text);
+		return list;
+	}
 	if (!qjs_parse_selector_chain(selector_text, &chain)) {
 #ifdef LEONOS_USER_APP
 		leonos_write("NETSURF QUICKJS QUERYALL unsupported ");
@@ -4256,17 +4567,15 @@ static JSValue qjs_document_query_selector_all(JSContext *ctx,
 	    scope_type == DOM_ELEMENT_NODE) {
 		(void) qjs_sync_js_child_nodes_into_native(ctx, this_val,
 							   scope_node);
-		if (dom_element_get_elements_by_tag_name(
-			    (dom_element *) scope_node, tag_name, &nodes) ==
-		    DOM_NO_ERR) {
-			scoped_element_query = true;
-		}
+		scoped_element_query = true;
+		qjs_append_matching_descendants(ctx, list, scope_node, &chain,
+						&length, &out_index);
 	} else {
 		(void) dom_document_get_elements_by_tag_name(thread->htmlc->document,
 							     tag_name,
 							     &nodes);
 	}
-	if (nodes != NULL &&
+	if (!scoped_element_query && nodes != NULL &&
 	    dom_nodelist_get_length(nodes, &length) == DOM_NO_ERR) {
 		for (uint32_t i = 0u; i < length && out_index < 512u; i++) {
 			dom_node *node = NULL;
@@ -4277,8 +4586,7 @@ static JSValue qjs_document_query_selector_all(JSContext *ctx,
 			}
 			if (dom_node_get_node_type(node, &type) == DOM_NO_ERR &&
 			    type == DOM_ELEMENT_NODE &&
-			    (scoped_element_query ||
-			     qjs_query_scope_contains(scope_node, node)) &&
+			    qjs_query_scope_contains(scope_node, node) &&
 			    qjs_dom_element_matches_chain((dom_element *) node,
 							  &chain)) {
 				JS_DefinePropertyValueUint32(ctx, list,
@@ -5201,6 +5509,67 @@ static void qjs_refresh_runtime_shims(JSContext *ctx)
 	JS_FreeValue(ctx, result);
 }
 
+static void qjs_maybe_run_selector_selftest(JSContext *ctx)
+{
+#ifdef LEONOS_USER_APP
+	jsthread *thread = JS_GetContextOpaque(ctx);
+	static const char selftest[] =
+		"(function(){try{"
+		"var body=document.body||document.documentElement;"
+		"if(!body||!body.appendChild)return 'wait';"
+		"var root=document.createElement('div'),span=document.createElement('span'),"
+		"em=document.createElement('em'),strong=document.createElement('strong');"
+		"root.id='selector-root';span.className='a b';em.id='leaf';em.className='b';"
+		"strong.className='after';root.appendChild(span);span.appendChild(em);"
+		"root.appendChild(strong);body.appendChild(root);"
+		"var direct=root.querySelectorAll('span.a > em#leaf, strong.missing');"
+		"var desc=root.querySelectorAll('div.missing, span.a em.b');"
+		"var adjacent=root.querySelectorAll('span.a + strong.after');"
+		"var general=root.querySelectorAll('span.a ~ strong.after');"
+		"function isLeaf(n){return n&&n.id==='leaf'&&String(n.className||'').indexOf('b')>=0;}"
+		"function isStrong(n){return n&&String(n.className||'').indexOf('after')>=0;}"
+		"var ok=direct.length===1&&isLeaf(direct[0])&&desc.length===1&&"
+		"isLeaf(desc[0])&&adjacent.length===1&&isStrong(adjacent[0])&&"
+		"general.length===1&&isStrong(general[0]);"
+		"if(root.parentNode&&root.parentNode.removeChild)root.parentNode.removeChild(root);"
+		"console.log('NETSURF QUICKJS SELECTOR SELFTEST '+(ok?'ok':'fail'));"
+		"return ok?'ok':'fail';"
+		"}catch(e){console.log('NETSURF QUICKJS SELECTOR SELFTEST exception '+"
+		"(e&&e.message||e));return 'exception';}})();";
+	JSValue global;
+	JSValue document;
+	const char *status;
+	if (thread == NULL || thread->selector_selftest_ran) {
+		return;
+	}
+	global = JS_GetGlobalObject(ctx);
+	document = JS_GetPropertyStr(ctx, global, "document");
+	if (JS_IsObject(document)) {
+		qjs_document_bind_real_nodes(ctx, document);
+	}
+	JS_FreeValue(ctx, document);
+	JS_FreeValue(ctx, global);
+	JSValue result = JS_Eval(ctx, selftest, sizeof(selftest) - 1u,
+				 "leonos-quickjs-selector-selftest.js",
+				 JS_EVAL_TYPE_GLOBAL);
+	if (JS_IsException(result)) {
+		qjs_dump_exception(ctx, "leonos-quickjs-selector-selftest.js");
+		thread->selector_selftest_ran = true;
+	} else {
+		status = JS_ToCString(ctx, result);
+		if (status == NULL || strcmp(status, "wait") != 0) {
+			thread->selector_selftest_ran = true;
+		}
+		if (status != NULL) {
+			JS_FreeCString(ctx, status);
+		}
+	}
+	JS_FreeValue(ctx, result);
+#else
+	(void) ctx;
+#endif
+}
+
 static void qjs_install_globals(JSContext *ctx)
 {
 	JSValue global = JS_GetGlobalObject(ctx);
@@ -5393,6 +5762,7 @@ static void qjs_boost_route_timer_budget(JSContext *ctx, const char *name)
 	if (ctx == NULL || name == NULL ||
 	    strstr(name, "js.rbxcdn.com/") == NULL ||
 	    (strstr(name, "GameCarousel.") == NULL &&
+	     strstr(name, "ReactLanding.") == NULL &&
 	     strstr(name, "SearchLandingPage.") == NULL)) {
 		return;
 	}
@@ -5832,6 +6202,7 @@ bool js_exec(jsthread *thread, const uint8_t *txt, size_t txtlen,
 #endif
 	qjs_process_pending_redraws();
 	qjs_refresh_runtime_shims(thread->ctx);
+	qjs_maybe_run_selector_selftest(thread->ctx);
 	qjs_boost_route_timer_budget(thread->ctx, name);
 	qjs_begin_script_interrupt(thread->heap, eval_len, name);
 	thread->active_script_name = name;
@@ -5858,6 +6229,12 @@ bool js_exec(jsthread *thread, const uint8_t *txt, size_t txtlen,
 	qjs_run_roblox_thumbnail_probe(thread->ctx, name);
 	html_leonos_dom_flush_mutations(thread->htmlc);
 	qjs_process_pending_redraws();
+	bool cooperative_react_stop = JS_IsException(result) &&
+		interrupted &&
+		thread->active_script_react_landing_attached &&
+		name != NULL &&
+		strstr(name, "js.rbxcdn.com/") != NULL &&
+		strstr(name, "ReactLanding.") != NULL;
 	thread->active_script_name = NULL;
 	thread->active_script_dom_appends = 0u;
 	thread->active_script_dom_budget_hit = false;
@@ -5868,6 +6245,18 @@ bool js_exec(jsthread *thread, const uint8_t *txt, size_t txtlen,
 		thread->active_script_react_landing_candidate = NULL;
 	}
 	if (JS_IsException(result)) {
+		if (cooperative_react_stop) {
+#ifdef LEONOS_USER_APP
+			leonos_write("NETSURF QUICKJS DOM REACT COOPERATIVE STOP ");
+			leonos_write(name != NULL ? name : "?script?");
+			leonos_write("\r\n");
+#endif
+			JSValue exception = JS_GetException(thread->ctx);
+			JS_FreeValue(thread->ctx, exception);
+			JS_FreeValue(thread->ctx, result);
+			free(eval_copy);
+			return true;
+		}
 #ifdef LEONOS_USER_APP
 		if (interrupted) {
 			char detail[320];

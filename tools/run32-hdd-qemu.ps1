@@ -35,11 +35,11 @@ $ImagePath = Get-LeonOsImagePath $Image
 $HddPath = Get-LeonOsImagePath $HddImage
 
 $DisplayArg = switch ($Mode) {
-    "Native1080p" { "gtk,zoom-to-fit=off,show-menubar=off,grab-on-hover=on,show-cursor=off" }
-    "Small720p" { "gtk,zoom-to-fit=on,show-menubar=off,grab-on-hover=on,show-cursor=off" }
-    "Small720pNet" { "gtk,zoom-to-fit=on,show-menubar=off,grab-on-hover=on,show-cursor=off" }
-    "ScaledMaximize" { "gtk,zoom-to-fit=on,show-menubar=off,grab-on-hover=on,show-cursor=off" }
-    default { "gtk,zoom-to-fit=off,show-menubar=off,grab-on-hover=on,show-cursor=off" }
+    "Native1080p" { "gtk,zoom-to-fit=off,show-menubar=off,grab-on-hover=on,show-cursor=on" }
+    "Small720p" { "gtk,zoom-to-fit=on,show-menubar=off,grab-on-hover=on,show-cursor=on" }
+    "Small720pNet" { "gtk,zoom-to-fit=on,show-menubar=off,grab-on-hover=on,show-cursor=on" }
+    "ScaledMaximize" { "gtk,zoom-to-fit=on,show-menubar=off,grab-on-hover=on,show-cursor=on" }
+    default { "gtk,zoom-to-fit=off,show-menubar=off,grab-on-hover=on,show-cursor=on" }
 }
 
 $Size = switch ($Resolution) {

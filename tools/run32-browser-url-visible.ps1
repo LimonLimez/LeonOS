@@ -91,9 +91,9 @@ $MonitorPort = ([System.Net.IPEndPoint] $Listener.LocalEndpoint).Port
 $Listener.Stop()
 
 $DisplayArg = if ($Resolution -eq "1080p") {
-    "gtk,zoom-to-fit=off,show-menubar=off,grab-on-hover=on,show-cursor=off"
+    "gtk,zoom-to-fit=off,show-menubar=off,grab-on-hover=on,show-cursor=on"
 } else {
-    "gtk,zoom-to-fit=on,show-menubar=off,grab-on-hover=on,show-cursor=off"
+    "gtk,zoom-to-fit=on,show-menubar=off,grab-on-hover=on,show-cursor=on"
 }
 
 $Arguments = @(
