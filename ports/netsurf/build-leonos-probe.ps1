@@ -929,6 +929,7 @@ function Ensure-NetSurfLeonOsSourcePatches {
     $CssSource = Join-Path $NetSurfRoot "content\handlers\css\css.c"
     $HtmlCssSource = Join-Path $NetSurfRoot "content\handlers\html\css.c"
     $HtmlSource = Join-Path $NetSurfRoot "content\handlers\html\html.c"
+    $BoxConstructSource = Join-Path $NetSurfRoot "content\handlers\html\box_construct.c"
     $InteractionSource = Join-Path $NetSurfRoot "content\handlers\html\interaction.c"
     $LayoutSource = Join-Path $NetSurfRoot "content\handlers\html\layout.c"
     $BoxTextareaSource = Join-Path $NetSurfRoot "content\handlers\html\box_textarea.c"
@@ -952,6 +953,9 @@ function Ensure-NetSurfLeonOsSourcePatches {
     }
     if (-not (Test-Path -LiteralPath $HtmlSource)) {
         throw "NetSurf HTML source missing at $HtmlSource."
+    }
+    if (-not (Test-Path -LiteralPath $BoxConstructSource)) {
+        throw "NetSurf HTML box construct source missing at $BoxConstructSource."
     }
     if (-not (Test-Path -LiteralPath $InteractionSource)) {
         throw "NetSurf HTML interaction source missing at $InteractionSource."
@@ -1011,6 +1015,358 @@ function Ensure-NetSurfLeonOsSourcePatches {
         $MonkeyFetchText = $MonkeyFetchText.Replace($OldDefaultCssRule, $NewDefaultCssRule)
         [System.IO.File]::WriteAllText($MonkeyFetchSource, $MonkeyFetchText, [System.Text.Encoding]::ASCII)
     }
+
+    $BoxConstructText = [System.IO.File]::ReadAllText($BoxConstructSource) -replace "`r`n", "`n"
+    if ($BoxConstructText -match 'leonos_dom_text_has_hidden_ancestor') {
+        $OldHiddenAncestorRegex = '(?s)#ifdef LEONOS_USER_APP\s*static bool leonos_dom_name_equals_ascii\(dom_string \*name, const char \*ascii\).*?static bool leonos_dom_text_has_hidden_ancestor\(dom_node \*n\).*?#endif\s*\n\n'
+        $HiddenAncestorRegex = [System.Text.RegularExpressions.Regex]::new($OldHiddenAncestorRegex)
+        $UpdatedBoxConstructText = $HiddenAncestorRegex.Replace(
+                $BoxConstructText,
+                "",
+                1)
+        if ($UpdatedBoxConstructText -eq $BoxConstructText) {
+            throw "Could not remove old LeonOS hidden DOM text guard."
+        }
+        $BoxConstructText = $UpdatedBoxConstructText.Replace(
+                "leonos_dom_text_has_hidden_ancestor(ctx->n)",
+                "leonos_dom_text_has_nonrendered_ancestor(ctx->n)")
+    }
+    if ($BoxConstructText -notmatch 'leonos_dom_element_is_nonrendered') {
+        $OldContainingBlockFlex = @'
+static inline bool box__containing_block_is_flex(
+		const struct box_construct_props *props)
+{
+	return props->containing_block != NULL &&
+	       box__is_flex(props->containing_block);
+}
+
+'@
+        $OldContainingBlockFlex = $OldContainingBlockFlex -replace "`r`n", "`n"
+        $NewContainingBlockFlex = @'
+static inline bool box__containing_block_is_flex(
+		const struct box_construct_props *props)
+{
+	return props->containing_block != NULL &&
+	       box__is_flex(props->containing_block);
+}
+
+#ifdef LEONOS_USER_APP
+static bool leonos_dom_name_equals_ascii(dom_string *name, const char *ascii)
+{
+	const char *data = dom_string_data(name);
+	size_t len = dom_string_byte_length(name);
+	size_t ascii_len = strlen(ascii);
+	size_t i;
+
+	if (len != ascii_len)
+		return false;
+
+	for (i = 0; i < len; i++) {
+		if (ascii_to_lower(data[i]) != ascii[i])
+			return false;
+	}
+
+	return true;
+}
+
+static bool leonos_dom_element_is_nonrendered(dom_node *node)
+{
+	dom_node_type type = DOM_NODE_TYPE_COUNT;
+	dom_string *name = NULL;
+	dom_exception err;
+	bool hidden = false;
+
+	err = dom_node_get_node_type(node, &type);
+	if (err != DOM_NO_ERR || type != DOM_ELEMENT_NODE)
+		return false;
+
+	err = dom_node_get_node_name(node, &name);
+	if (err != DOM_NO_ERR || name == NULL)
+		return false;
+
+	hidden = leonos_dom_name_equals_ascii(name, "head") ||
+			leonos_dom_name_equals_ascii(name, "script") ||
+			leonos_dom_name_equals_ascii(name, "style") ||
+			leonos_dom_name_equals_ascii(name, "title") ||
+			leonos_dom_name_equals_ascii(name, "meta") ||
+			leonos_dom_name_equals_ascii(name, "link") ||
+			leonos_dom_name_equals_ascii(name, "template") ||
+			leonos_dom_name_equals_ascii(name, "base") ||
+			leonos_dom_name_equals_ascii(name, "param") ||
+			leonos_dom_name_equals_ascii(name, "source") ||
+			leonos_dom_name_equals_ascii(name, "track") ||
+			leonos_dom_name_equals_ascii(name, "noscript");
+
+	dom_string_unref(name);
+	return hidden;
+}
+
+static bool leonos_dom_element_name_is(dom_node *node, const char *ascii)
+{
+	dom_node_type type = DOM_NODE_TYPE_COUNT;
+	dom_string *name = NULL;
+	dom_exception err;
+	bool matches = false;
+
+	err = dom_node_get_node_type(node, &type);
+	if (err != DOM_NO_ERR || type != DOM_ELEMENT_NODE)
+		return false;
+
+	err = dom_node_get_node_name(node, &name);
+	if (err != DOM_NO_ERR || name == NULL)
+		return false;
+
+	matches = leonos_dom_name_equals_ascii(name, ascii);
+	dom_string_unref(name);
+	return matches;
+}
+
+static bool leonos_dom_text_has_nonrendered_ancestor(dom_node *n)
+{
+	dom_node *current = NULL;
+	dom_exception err;
+
+	err = dom_node_get_parent_node(n, &current);
+	if (err != DOM_NO_ERR)
+		return false;
+
+	while (current != NULL) {
+		dom_node *parent = NULL;
+
+		if (leonos_dom_element_is_nonrendered(current)) {
+			dom_node_unref(current);
+			return true;
+		}
+
+		err = dom_node_get_parent_node(current, &parent);
+		dom_node_unref(current);
+
+		if (err != DOM_NO_ERR)
+			return false;
+
+		current = parent;
+	}
+
+	return false;
+}
+
+static bool leonos_dom_text_has_source_ancestor(dom_node *n)
+{
+	dom_node *current = NULL;
+	dom_exception err;
+
+	err = dom_node_get_parent_node(n, &current);
+	if (err != DOM_NO_ERR)
+		return false;
+
+	while (current != NULL) {
+		dom_node *parent = NULL;
+		bool is_source = leonos_dom_element_name_is(current, "pre") ||
+				leonos_dom_element_name_is(current, "code") ||
+				leonos_dom_element_name_is(current, "textarea");
+
+		if (is_source) {
+			dom_node_unref(current);
+			return true;
+		}
+
+		err = dom_node_get_parent_node(current, &parent);
+		dom_node_unref(current);
+
+		if (err != DOM_NO_ERR)
+			return false;
+
+		current = parent;
+	}
+
+	return false;
+}
+
+static bool leonos_ascii_region_starts_ci(const char *data,
+		size_t len,
+		size_t off,
+		const char *ascii)
+{
+	size_t i;
+
+	for (i = 0; ascii[i] != 0; i++) {
+		if (off + i >= len ||
+		    ascii_to_lower(data[off + i]) != ascii[i]) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+static bool leonos_dom_text_looks_nonrendered_source(dom_node *n,
+		dom_string *content)
+{
+	const char *data;
+	size_t len;
+	size_t off = 0;
+	size_t i;
+	unsigned int semicolons = 0;
+	unsigned int colons = 0;
+	bool has_open_brace = false;
+	bool has_close_brace = false;
+
+	if (content == NULL || leonos_dom_text_has_source_ancestor(n))
+		return false;
+
+	data = dom_string_data(content);
+	len = dom_string_byte_length(content);
+	while (off < len && (data[off] == ' ' || data[off] == '\t' ||
+			data[off] == '\r' || data[off] == '\n' ||
+			data[off] == '\f')) {
+		off++;
+	}
+	if (off >= len)
+		return false;
+
+	if (leonos_ascii_region_starts_ci(data, len, off, "<meta") ||
+	    leonos_ascii_region_starts_ci(data, len, off, "<style") ||
+	    leonos_ascii_region_starts_ci(data, len, off, "</style") ||
+	    leonos_ascii_region_starts_ci(data, len, off, "<script") ||
+	    leonos_ascii_region_starts_ci(data, len, off, "</script") ||
+	    leonos_ascii_region_starts_ci(data, len, off, "<link") ||
+	    leonos_ascii_region_starts_ci(data, len, off, "<base") ||
+	    leonos_ascii_region_starts_ci(data, len, off, "@media") ||
+	    leonos_ascii_region_starts_ci(data, len, off, "@keyframes") ||
+	    leonos_ascii_region_starts_ci(data, len, off, "@-webkit-keyframes")) {
+		return true;
+	}
+
+	for (i = off; i < len; i++) {
+		switch (data[i]) {
+		case '{':
+			has_open_brace = true;
+			break;
+		case '}':
+			has_close_brace = true;
+			break;
+		case ';':
+			semicolons++;
+			break;
+		case ':':
+			colons++;
+			break;
+		default:
+			break;
+		}
+	}
+
+	return len - off > 512 &&
+			has_open_brace &&
+			has_close_brace &&
+			semicolons >= 4 &&
+			colons >= 4;
+}
+#endif
+
+'@
+        $NewContainingBlockFlex = $NewContainingBlockFlex -replace "`r`n", "`n"
+        if (-not $BoxConstructText.Contains($OldContainingBlockFlex)) {
+            throw "Could not patch NetSurf LeonOS non-rendered DOM helpers."
+        }
+        $BoxConstructText = $BoxConstructText.Replace($OldContainingBlockFlex, $NewContainingBlockFlex)
+    }
+    if ($BoxConstructText -notmatch 'leonos_dom_element_is_nonrendered\(ctx->n\)') {
+        $OldElementConstructStart = @'
+	assert(ctx->n != NULL);
+
+	box_extract_properties(ctx->n, &props);
+'@
+        $OldElementConstructStart = $OldElementConstructStart -replace "`r`n", "`n"
+        $NewElementConstructStart = @'
+	assert(ctx->n != NULL);
+
+#ifdef LEONOS_USER_APP
+	if (leonos_dom_element_is_nonrendered(ctx->n)) {
+		*convert_children = false;
+		return true;
+	}
+#endif
+
+	box_extract_properties(ctx->n, &props);
+'@
+        $NewElementConstructStart = $NewElementConstructStart -replace "`r`n", "`n"
+        $ElementConstructRegex = [System.Text.RegularExpressions.Regex]::new(
+                [System.Text.RegularExpressions.Regex]::Escape($OldElementConstructStart))
+        $UpdatedBoxConstructText = $ElementConstructRegex.Replace(
+                $BoxConstructText,
+                $NewElementConstructStart,
+                1)
+        if ($UpdatedBoxConstructText -eq $BoxConstructText) {
+            throw "Could not patch NetSurf LeonOS non-rendered element skip."
+        }
+        $BoxConstructText = $UpdatedBoxConstructText
+    }
+    if ($BoxConstructText -notmatch 'leonos_dom_text_has_nonrendered_ancestor\(ctx->n\)') {
+        $OldTextConstructStart = @'
+	assert(ctx->n != NULL);
+
+	box_extract_properties(ctx->n, &props);
+'@
+        $OldTextConstructStart = $OldTextConstructStart -replace "`r`n", "`n"
+        $NewTextConstructStart = @'
+	assert(ctx->n != NULL);
+
+#ifdef LEONOS_USER_APP
+	if (leonos_dom_text_has_nonrendered_ancestor(ctx->n))
+		return true;
+#endif
+
+	box_extract_properties(ctx->n, &props);
+'@
+        $NewTextConstructStart = $NewTextConstructStart -replace "`r`n", "`n"
+        $TextConstructRegex = [System.Text.RegularExpressions.Regex]::new(
+                [System.Text.RegularExpressions.Regex]::Escape($OldTextConstructStart))
+        $UpdatedBoxConstructText = $TextConstructRegex.Replace(
+                $BoxConstructText,
+                $NewTextConstructStart,
+                1)
+        if ($UpdatedBoxConstructText -eq $BoxConstructText) {
+            throw "Could not patch NetSurf LeonOS non-rendered text skip."
+        }
+        $BoxConstructText = $UpdatedBoxConstructText
+    }
+    if ($BoxConstructText -notmatch 'leonos_dom_text_looks_nonrendered_source\(ctx->n, content\)') {
+        $OldTextContentRead = @'
+	err = dom_characterdata_get_data(ctx->n, &content);
+	if (err != DOM_NO_ERR || content == NULL)
+		return false;
+
+	if (css_computed_white_space(props.parent_style) ==
+'@
+        $OldTextContentRead = $OldTextContentRead -replace "`r`n", "`n"
+        $NewTextContentRead = @'
+	err = dom_characterdata_get_data(ctx->n, &content);
+	if (err != DOM_NO_ERR || content == NULL)
+		return false;
+
+#ifdef LEONOS_USER_APP
+	if (leonos_dom_text_looks_nonrendered_source(ctx->n, content)) {
+		dom_string_unref(content);
+		return true;
+	}
+#endif
+
+	if (css_computed_white_space(props.parent_style) ==
+'@
+        $NewTextContentRead = $NewTextContentRead -replace "`r`n", "`n"
+        $TextContentRegex = [System.Text.RegularExpressions.Regex]::new(
+                [System.Text.RegularExpressions.Regex]::Escape($OldTextContentRead))
+        $UpdatedBoxConstructText = $TextContentRegex.Replace(
+                $BoxConstructText,
+                $NewTextContentRead,
+                1)
+        if ($UpdatedBoxConstructText -eq $BoxConstructText) {
+            throw "Could not patch NetSurf LeonOS non-rendered source text skip."
+        }
+        $BoxConstructText = $UpdatedBoxConstructText
+    }
+    [System.IO.File]::WriteAllText($BoxConstructSource, $BoxConstructText, [System.Text.Encoding]::ASCII)
 
     $CssText = [System.IO.File]::ReadAllText($CssSource) -replace "`r`n", "`n"
     if ($CssText -notmatch 'leonos_css_in_prefers_dark_media') {
