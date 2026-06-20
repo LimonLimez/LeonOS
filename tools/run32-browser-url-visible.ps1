@@ -52,6 +52,29 @@ function Wait-SerialContains {
     throw "Timed out waiting for serial proof: $Needle"
 }
 
+function Wait-SerialContainsAfter {
+    param(
+        [string] $LogPath,
+        [string] $Needle,
+        [int] $Offset,
+        [int] $TimeoutMs
+    )
+    $Deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+    while ([DateTime]::UtcNow -lt $Deadline) {
+        if (Test-Path -LiteralPath $LogPath) {
+            $Text = Get-Content -LiteralPath $LogPath -Raw -ErrorAction SilentlyContinue
+            if ($Text -and $Text.Length -ge $Offset) {
+                $Tail = $Text.Substring($Offset)
+                if ($Tail.Contains($Needle)) {
+                    return $Text
+                }
+            }
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    throw "Timed out waiting for serial proof after navigation: $Needle"
+}
+
 & (Join-Path $PSScriptRoot "build32-image.ps1") -Resolution $Resolution | Write-Host
 & (Join-Path $PSScriptRoot "build32-hdd.ps1") | Write-Host
 
@@ -77,7 +100,7 @@ $Arguments = @(
     "-name", "LeonOS-BrowserUrl-Visible-$Resolution",
     "-machine", "pc",
     "-cpu", "qemu32",
-    "-m", "32M",
+    "-m", "256M",
     "-drive", "file=$ImagePath,format=raw,if=floppy",
     "-drive", "file=$HddPath,format=raw,if=ide,index=0,media=disk",
     "-boot", "a",
@@ -123,10 +146,12 @@ try {
         Wait-QemuMonitorPrompt $Stream 1000
         Start-Sleep -Milliseconds 20
     }
+    $BeforeNavigate = Get-Content -LiteralPath $SerialLog -Raw -ErrorAction SilentlyContinue
+    $BeforeNavigateLength = if ($BeforeNavigate) { $BeforeNavigate.Length } else { 0 }
     $Writer.WriteLine("sendkey ret")
     Wait-QemuMonitorPrompt $Stream 3000
-    $null = Wait-SerialContains $SerialLog "LeonOS net HTTPS status" ($TimeoutSeconds * 1000)
-    $null = Wait-SerialContains $SerialLog "LeonOS net browser state COMPLETE" ($TimeoutSeconds * 1000)
+    $null = Wait-SerialContainsAfter $SerialLog "LeonOS net HTTPS status" $BeforeNavigateLength ($TimeoutSeconds * 1000)
+    $null = Wait-SerialContainsAfter $SerialLog "WINDOW REDRAW WIN 0 STOP" $BeforeNavigateLength ($TimeoutSeconds * 1000)
     $Writer.WriteLine("screendump $($ShotPath -replace '\\', '/')")
     Wait-QemuMonitorPrompt $Stream 5000
 } finally {

@@ -3417,11 +3417,17 @@ struct qjs_simple_selector {
 	char attr[64];
 	char attr_value[128];
 	char not_attr[64];
+	char not_tag[32];
+	char not_id[96];
+	char not_class_name[96];
 	bool has_tag;
 	bool has_id;
 	bool has_class;
 	bool has_attr;
 	bool has_not_attr;
+	bool has_not_tag;
+	bool has_not_id;
+	bool has_not_class;
 	bool has_checked_pseudo;
 	bool has_enabled_pseudo;
 	bool want_enabled_pseudo;
@@ -3632,41 +3638,86 @@ static bool qjs_parse_selector_part(const char *text,
 			}
 		} else if (text[i] == ':' && i + 5u < end &&
 			   strncmp(text + i, ":not(", 5u) == 0) {
-			size_t attr_start;
 			i += 5u;
 			while (i < end && qjs_ascii_space(text[i])) {
 				i += 1u;
 			}
-			if (i >= end || text[i] != '[') {
+			if (i >= end) {
 				selector->unsupported = true;
 				return false;
 			}
-			i += 1u;
+			if (text[i] == '[') {
+				size_t attr_start;
+				i += 1u;
+				while (i < end && qjs_ascii_space(text[i])) {
+					i += 1u;
+				}
+				attr_start = i;
+				while (i < end && text[i] != ']' &&
+				       !qjs_ascii_space(text[i]) &&
+				       text[i] != '=' && text[i] != '|' &&
+				       text[i] != '~' && text[i] != '^' &&
+				       text[i] != '$' && text[i] != '*') {
+					i += 1u;
+				}
+				qjs_copy_selector_text(selector->not_attr,
+						       sizeof(selector->not_attr),
+						       text, attr_start, i);
+				selector->has_not_attr = selector->not_attr[0] != 0;
+				while (i < end && text[i] != ']') {
+					i += 1u;
+				}
+				if (i < end && text[i] == ']') {
+					i += 1u;
+				}
+			} else if (text[i] == '.') {
+				size_t token_start = ++i;
+				while (i < end && text[i] != ')' &&
+				       !qjs_selector_special(text[i])) {
+					i += 1u;
+				}
+				qjs_copy_selector_text(selector->not_class_name,
+					sizeof(selector->not_class_name),
+					text, token_start, i);
+				selector->has_not_class =
+					selector->not_class_name[0] != 0;
+			} else if (text[i] == '#') {
+				size_t token_start = ++i;
+				while (i < end && text[i] != ')' &&
+				       !qjs_selector_special(text[i])) {
+					i += 1u;
+				}
+				qjs_copy_selector_text(selector->not_id,
+						       sizeof(selector->not_id),
+						       text, token_start, i);
+				selector->has_not_id = selector->not_id[0] != 0;
+			} else if (text[i] == '*') {
+				selector->has_not_tag = true;
+				selector->not_tag[0] = '*';
+				selector->not_tag[1] = 0;
+				i += 1u;
+			} else if ((text[i] >= 'A' && text[i] <= 'Z') ||
+				   (text[i] >= 'a' && text[i] <= 'z')) {
+				size_t token_start = i;
+				while (i < end && text[i] != ')' &&
+				       !qjs_selector_special(text[i])) {
+					i += 1u;
+				}
+				qjs_copy_selector_text(selector->not_tag,
+						       sizeof(selector->not_tag),
+						       text, token_start, i);
+				selector->has_not_tag =
+					selector->not_tag[0] != 0;
+			} else {
+				selector->unsupported = true;
+				return false;
+			}
 			while (i < end && qjs_ascii_space(text[i])) {
 				i += 1u;
 			}
-			attr_start = i;
-			while (i < end && text[i] != ']' &&
-			       !qjs_ascii_space(text[i]) &&
-			       text[i] != '=' && text[i] != '|' &&
-			       text[i] != '~' && text[i] != '^' &&
-			       text[i] != '$' && text[i] != '*') {
-				i += 1u;
-			}
-			qjs_copy_selector_text(selector->not_attr,
-					       sizeof(selector->not_attr),
-					       text, attr_start, i);
-			selector->has_not_attr = selector->not_attr[0] != 0;
-			while (i < end && text[i] != ']') {
-				i += 1u;
-			}
-			if (i < end && text[i] == ']') {
-				i += 1u;
-			}
-			while (i < end && qjs_ascii_space(text[i])) {
-				i += 1u;
-			}
-			if (i >= end || text[i] != ')') {
+			if (i >= end || text[i] != ')' ||
+			    !(selector->has_not_attr || selector->has_not_tag ||
+			      selector->has_not_id || selector->has_not_class)) {
 				selector->unsupported = true;
 				return false;
 			}
@@ -3880,8 +3931,8 @@ static bool qjs_dom_element_matches(dom_element *element,
 	if (element == NULL) {
 		return false;
 	}
-	if (selector->has_tag || selector->has_checked_pseudo ||
-	    selector->has_enabled_pseudo) {
+	if (selector->has_tag || selector->has_not_tag ||
+	    selector->has_checked_pseudo || selector->has_enabled_pseudo) {
 		if (dom_element_get_tag_name(element, &tag) != DOM_NO_ERR ||
 		    tag == NULL) {
 			matched = false;
@@ -3892,14 +3943,31 @@ static bool qjs_dom_element_matches(dom_element *element,
 			matched = false;
 		}
 	}
-	if (matched && selector->has_id) {
+	if (matched && selector->has_not_tag) {
+		if (selector->not_tag[0] == '*' ||
+		    qjs_ascii_equal_ci(dom_string_data(tag), selector->not_tag)) {
+			matched = false;
+		}
+	}
+	if (matched && (selector->has_id || selector->has_not_id)) {
 		qjs_read_dom_attribute(element, "id", &id);
+	}
+	if (matched && selector->has_id) {
 		matched = qjs_dom_string_equals_cstr(id, selector->id);
 	}
-	if (matched && selector->has_class) {
+	if (matched && selector->has_not_id) {
+		matched = !qjs_dom_string_equals_cstr(id, selector->not_id);
+	}
+	if (matched && (selector->has_class || selector->has_not_class)) {
 		qjs_read_dom_attribute(element, "class", &class_name);
+	}
+	if (matched && selector->has_class) {
 		matched = qjs_dom_class_contains(class_name,
 						 selector->class_name);
+	}
+	if (matched && selector->has_not_class) {
+		matched = !qjs_dom_class_contains(class_name,
+						  selector->not_class_name);
 	}
 	if (matched && selector->has_attr) {
 		qjs_read_dom_attribute(element, selector->attr, &attr);
