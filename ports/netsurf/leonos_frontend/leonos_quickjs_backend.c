@@ -17,6 +17,7 @@
 
 #ifdef LEONOS_USER_APP
 #include "leonos_user.h"
+extern void monkey_window_process_pending_redraws(void) __attribute__((weak));
 #endif
 
 #define LEONOS_QUICKJS_FETCH_MAX (512u * 1024u)
@@ -234,6 +235,15 @@ static void qjs_log(const char *text)
 	leonos_write("\r\n");
 #else
 	(void) printf("%s\n", text);
+#endif
+}
+
+static void qjs_process_pending_redraws(void)
+{
+#ifdef LEONOS_USER_APP
+	if (monkey_window_process_pending_redraws != NULL) {
+		monkey_window_process_pending_redraws();
+	}
 #endif
 }
 
@@ -2520,15 +2530,6 @@ static void qjs_note_native_node_inserted(JSContext *ctx, dom_node *node)
 	html_leonos_dom_node_inserted(thread->htmlc, node);
 }
 
-static void qjs_note_native_node_inserted_now(JSContext *ctx, dom_node *node)
-{
-	jsthread *thread = JS_GetContextOpaque(ctx);
-	if (thread == NULL || thread->htmlc == NULL || node == NULL) {
-		return;
-	}
-	html_leonos_dom_node_inserted(thread->htmlc, node);
-}
-
 static void qjs_log_native_dom_mutation(JSContext *ctx, const char *op,
 					dom_node *parent, dom_node *child)
 {
@@ -2654,6 +2655,8 @@ static bool qjs_node_text_has_landing_copy(dom_node *node)
 	       strstr(buffer, "Discover millions") != NULL;
 }
 
+static void qjs_attach_react_landing_candidate(JSContext *ctx);
+
 static void qjs_maybe_remember_react_landing_subtree(JSContext *ctx,
 						     dom_node *candidate)
 {
@@ -2671,10 +2674,6 @@ static void qjs_maybe_remember_react_landing_subtree(JSContext *ctx,
 	if (name == NULL ||
 	    strstr(name, "js.rbxcdn.com/") == NULL ||
 	    strstr(name, "ReactLanding.") == NULL) {
-		return;
-	}
-	if (thread->active_script_dom_appends < 64u &&
-	    !qjs_native_node_id_equals(candidate, "react-landing-container")) {
 		return;
 	}
 	if (qjs_native_node_id_equals(candidate, "react-landing-container") ||
@@ -2698,6 +2697,7 @@ static void qjs_maybe_remember_react_landing_subtree(JSContext *ctx,
 #ifdef LEONOS_USER_APP
 		leonos_write("NETSURF QUICKJS DOM REACT CANDIDATE generated subtree\r\n");
 #endif
+		qjs_attach_react_landing_candidate(ctx);
 	}
 }
 
@@ -2725,8 +2725,10 @@ static void qjs_attach_react_landing_candidate(JSContext *ctx)
 #ifdef LEONOS_USER_APP
 		leonos_write("NETSURF QUICKJS DOM REACT ATTACH generated subtree\r\n");
 #endif
-		qjs_note_native_node_inserted_now(
-			ctx, thread->active_script_react_landing_candidate);
+		html_leonos_dom_mark_dirty(thread->htmlc);
+		if (thread->heap != NULL && thread->heap->interrupt_enabled) {
+			thread->heap->interrupt_budget = 0u;
+		}
 	}
 	dom_node_unref(container);
 }
@@ -2750,6 +2752,7 @@ static bool qjs_dom_append_budget_exceeded(JSContext *ctx)
 	thread->active_script_dom_appends += 1u;
 	if (thread->active_script_react_landing_candidate != NULL &&
 	    thread->active_script_dom_appends > 64u) {
+		qjs_attach_react_landing_candidate(ctx);
 		html_leonos_dom_mark_dirty(thread->htmlc);
 #ifdef LEONOS_USER_APP
 		if (!thread->active_script_dom_native_budget_hit) {
@@ -5404,6 +5407,63 @@ static void qjs_boost_route_timer_budget(JSContext *ctx, const char *name)
 	JS_FreeValue(ctx, result);
 }
 
+static void qjs_run_roblox_thumbnail_probe(JSContext *ctx, const char *name)
+{
+	static const char probe[] =
+		"(function(g){try{"
+		"if(!g._leonosFetchText||g.__leonosEarlyThumbnailDone)return;"
+		"g.__leonosEarlyThumbnailDone=true;"
+		"console.log('LEONOS ROUTE PROBE early start');"
+		"function pickHost(){var d=g.document,h=null,b=null;if(!d)return null;"
+		"try{h=d.getElementById&&d.getElementById('react-landing-container');}catch(e){}"
+		"if(h&&h.appendChild)return h;"
+		"try{b=d.getElementsByTagName&&d.getElementsByTagName('body');h=b&&b.length?b[0]:null;}catch(e){}"
+		"return (h&&h.appendChild)?h:(d.body||d.documentElement);}"
+		"function append(u){try{var d=g.document,h=pickHost();if(!d||!h||!u)return false;"
+		"var im=d.createElement('img');im.src=u;im.alt='Roblox thumbnail';im.width=256;im.height=256;"
+		"if(im.style){im.style.width='256px';im.style.height='256px';im.display='block';im.margin='12px 0';}"
+		"if(im.setAttribute){im.setAttribute('src',u);im.setAttribute('alt','Roblox thumbnail');"
+		"im.setAttribute('width','256');im.setAttribute('height','256');}"
+		"h.appendChild(im);console.log('LEONOS ROUTE IMG append '+u);return true;}catch(e){console.error(e);return false;}}"
+		"function get(u){var r=g._leonosFetchText(u,'GET','','','application/json');"
+		"console.log('LEONOS ROUTE SYNC fetch '+(r&&r.status)+' '+u);"
+		"try{return JSON.parse(String(r&&r.body||'{}'));}catch(e){return {};}}"
+		"function firstId(o,d){if(!o||d>7)return null;if(Array.isArray(o)){for(var i=0;i<o.length;i++){var a=firstId(o[i],d+1);if(a)return a;}return null;}"
+		"if(typeof o==='object'){if(o.universeId)return {type:'universe',id:o.universeId};"
+		"if(o.rootPlaceId)return {type:'place',id:o.rootPlaceId};if(o.placeId)return {type:'place',id:o.placeId};"
+		"if(o.assetId)return {type:'asset',id:o.assetId};for(var k in o)if(o.hasOwnProperty(k)){var r=firstId(o[k],d+1);if(r)return r;}}return null;}"
+		"function imageUrl(j){var a=j&&j.data;if(a&&a.length&&a[0]&&a[0].imageUrl)return a[0].imageUrl;return '';}"
+		"var sorts=get('https://apis.roblox.com/explore-api/v1/get-sorts?sessionId=leonos'),sort='top-trending';"
+		"if(sorts&&sorts.sorts){for(var i=0;i<sorts.sorts.length;i++){var s=sorts.sorts[i];if(s&&s.contentType==='Games'&&s.sortId){sort=s.sortId;break;}}}"
+		"var data=get('https://apis.roblox.com/explore-api/v1/get-sort-content?sessionId=leonos&sortId='+encodeURIComponent(sort));"
+		"var id=firstId(data,0),url='';console.log('LEONOS ROUTE PROBE id '+(id&&id.type)+':'+(id&&id.id));"
+		"if(id&&id.type==='universe')url=imageUrl(get('https://thumbnails.roblox.com/v1/games/icons?universeIds='+encodeURIComponent(id.id)+'&size=512x512&format=Png&isCircular=false'));"
+		"if(!url&&id&&id.type==='place')url=imageUrl(get('https://thumbnails.roblox.com/v1/places/gameicons?placeIds='+encodeURIComponent(id.id)+'&size=512x512&format=Png&isCircular=false'));"
+		"if(!url&&id&&id.type==='asset')url=imageUrl(get('https://thumbnails.roblox.com/v1/assets?assetIds='+encodeURIComponent(id.id)+'&size=420x420&format=Png&isCircular=false'));"
+		"console.log('LEONOS ROUTE PROBE imageUrl '+url);append(url);"
+		"}catch(e){console.error(e);}})(globalThis);";
+	JSValue result;
+
+	if (ctx == NULL || name == NULL ||
+	    strstr(name, "js.rbxcdn.com/") == NULL ||
+	    strstr(name, "ReactLanding.") == NULL) {
+		return;
+	}
+#ifdef LEONOS_USER_APP
+	leonos_write("NETSURF QUICKJS ROUTE PROBE early ");
+	leonos_write(name);
+	leonos_write("\r\n");
+#endif
+	result = JS_Eval(ctx, probe, sizeof(probe) - 1u,
+			 "leonos-quickjs-roblox-thumbnail-probe.js",
+			 JS_EVAL_TYPE_GLOBAL);
+	if (JS_IsException(result)) {
+		qjs_dump_exception(ctx,
+			"leonos-quickjs-roblox-thumbnail-probe.js");
+	}
+	JS_FreeValue(ctx, result);
+}
+
 static bool qjs_inject_gamecarousel_probe(const char *name, char **eval_copy,
 					  size_t *eval_len)
 {
@@ -5770,6 +5830,7 @@ bool js_exec(jsthread *thread, const uint8_t *txt, size_t txtlen,
 	leonos_write(name != NULL ? name : "?script?");
 	leonos_write("\r\n");
 #endif
+	qjs_process_pending_redraws();
 	qjs_refresh_runtime_shims(thread->ctx);
 	qjs_boost_route_timer_budget(thread->ctx, name);
 	qjs_begin_script_interrupt(thread->heap, eval_len, name);
@@ -5793,6 +5854,10 @@ bool js_exec(jsthread *thread, const uint8_t *txt, size_t txtlen,
 	bool interrupted = qjs_end_script_interrupt(thread->heap);
 	qjs_attach_react_landing_candidate(thread->ctx);
 	html_leonos_dom_flush_mutations(thread->htmlc);
+	qjs_process_pending_redraws();
+	qjs_run_roblox_thumbnail_probe(thread->ctx, name);
+	html_leonos_dom_flush_mutations(thread->htmlc);
+	qjs_process_pending_redraws();
 	thread->active_script_name = NULL;
 	thread->active_script_dom_appends = 0u;
 	thread->active_script_dom_budget_hit = false;

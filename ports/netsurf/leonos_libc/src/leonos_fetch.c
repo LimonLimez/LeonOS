@@ -383,6 +383,38 @@ static const char *leonos_fetch_mime_from_url(const char *url)
     return "text/html; charset=utf-8";
 }
 
+static char leonos_fetch_ascii_lower(char ch)
+{
+    if (ch >= 'A' && ch <= 'Z') {
+        return (char)(ch + ('a' - 'A'));
+    }
+    return ch;
+}
+
+static bool leonos_fetch_ascii_starts_ci(const char *text, const char *prefix)
+{
+    if (text == NULL || prefix == NULL) {
+        return false;
+    }
+    while (*prefix != 0) {
+        if (*text == 0 ||
+            leonos_fetch_ascii_lower(*text) !=
+            leonos_fetch_ascii_lower(*prefix)) {
+            return false;
+        }
+        text += 1;
+        prefix += 1;
+    }
+    return true;
+}
+
+static bool leonos_fetch_mime_is_stb_decodable(const char *mime)
+{
+    return mime != NULL &&
+           (strcmp(mime, "image/png") == 0 ||
+            strcmp(mime, "image/jpeg") == 0);
+}
+
 static bool leonos_fetch_url_names_decodable_image(const char *url)
 {
     size_t len;
@@ -963,6 +995,14 @@ static void leonos_fetch_copy_meta(struct leonos_fetch_context *ctx,
         ctx->content_type[i] = meta->content_type[i];
         ctx->content_type[i + 1u] = 0;
     }
+    if (leonos_fetch_ascii_starts_ci(ctx->content_type, "image/")) {
+        const char *url_mime = leonos_fetch_mime_from_url(
+                nsurl_access(ctx->url));
+        if (leonos_fetch_mime_is_stb_decodable(url_mime)) {
+            (void) snprintf(ctx->content_type, sizeof(ctx->content_type),
+                    "%s", url_mime);
+        }
+    }
     ctx->location[0] = 0;
     for (size_t i = 0u; i + 1u < sizeof(ctx->location) &&
          meta->location[i] != 0; i += 1u) {
@@ -1471,14 +1511,18 @@ static unsigned int leonos_fetch_priority(
     if (ctx->locked) {
         return 0u;
     }
+    if (!leonos_fetch_url_looks_subresource(url)) {
+        return 900u;
+    }
+    if (leonos_fetch_url_is_roblox_react_landing_route_script(url) &&
+        leonos_fetch_roblox_delivery_dependencies_ready(url)) {
+        return ctx->stream_handle != 0u ? 1200u : (begun ? 1190u : 1180u);
+    }
 #ifdef LEONOS_USER_APP
     if (ctx->stream_handle != 0u) {
         return 1000u;
     }
 #endif
-    if (!leonos_fetch_url_looks_subresource(url)) {
-        return 900u;
-    }
     if (leonos_fetch_url_looks_css(url)) {
         if (ctx->synthetic_empty) {
             return begun ? 890u : 880u;

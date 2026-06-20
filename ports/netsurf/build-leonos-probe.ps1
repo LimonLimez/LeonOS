@@ -926,6 +926,7 @@ function Ensure-NetSurfDuktapeGeneratedFiles {
 function Ensure-NetSurfLeonOsSourcePatches {
     $NetSurfRoot = Join-Path $VendorPath "netsurf"
     $FetchSource = Join-Path $NetSurfRoot "content\fetch.c"
+    $MimeSniffSource = Join-Path $NetSurfRoot "content\mimesniff.c"
     $CssSource = Join-Path $NetSurfRoot "content\handlers\css\css.c"
     $HtmlCssSource = Join-Path $NetSurfRoot "content\handlers\html\css.c"
     $HtmlSource = Join-Path $NetSurfRoot "content\handlers\html\html.c"
@@ -981,6 +982,9 @@ function Ensure-NetSurfLeonOsSourcePatches {
     if (-not (Test-Path -LiteralPath $FetchSource)) {
         throw "NetSurf fetch source missing at $FetchSource."
     }
+    if (-not (Test-Path -LiteralPath $MimeSniffSource)) {
+        throw "NetSurf MIME sniff source missing at $MimeSniffSource."
+    }
     if (-not (Test-Path -LiteralPath $ScriptSource)) {
         throw "NetSurf script source missing at $ScriptSource."
     }
@@ -1001,6 +1005,32 @@ function Ensure-NetSurfLeonOsSourcePatches {
     }
     if (-not (Test-Path -LiteralPath $MonkeyFetchSource)) {
         throw "NetSurf monkey fetch source missing at $MonkeyFetchSource."
+    }
+
+    $MimeSniffText = [System.IO.File]::ReadAllText($MimeSniffSource) -replace "`r`n", "`n"
+    if ($MimeSniffText -notmatch 'LEONOS_USER_APP\s*\n\s*\*effective_type = official_type;') {
+        $Needle = @'
+	if (data == NULL) {
+		lwc_string_unref(official_type);
+		return NSERROR_NEED_DATA;
+	}
+'@
+        $Replacement = @'
+	if (data == NULL) {
+#ifdef LEONOS_USER_APP
+		*effective_type = official_type;
+		return NSERROR_OK;
+#else
+		lwc_string_unref(official_type);
+		return NSERROR_NEED_DATA;
+#endif
+	}
+'@
+        $Updated = $MimeSniffText.Replace($Needle, $Replacement)
+        if ($Updated -eq $MimeSniffText) {
+            throw "Could not patch NetSurf LeonOS image MIME sniff handoff."
+        }
+        [System.IO.File]::WriteAllText($MimeSniffSource, $Updated, [System.Text.Encoding]::ASCII)
     }
 
     $MonkeyFetchText = [System.IO.File]::ReadAllText($MonkeyFetchSource) -replace "`r`n", "`n"
@@ -3307,7 +3337,8 @@ static bool leonos_script_async_blocks_later(hlcache_handle *script)
 	       (strstr(url, "c27f57f4a397dabc2fe3b74fec93c2401913bdf49373f9339c00b6f18b32d2ac") != NULL ||
 	        strstr(url, "63b59480fef503ff6648900d1051bae7531757a38ce24f77587552fca279d16c") != NULL ||
 	        strstr(url, "ReactUtilities.") != NULL ||
-	        strstr(url, "ReactStyleGuide.") != NULL);
+	        strstr(url, "ReactStyleGuide.") != NULL ||
+	        strstr(url, "ReactLanding.") != NULL);
 }
 #endif
 
@@ -3409,6 +3440,26 @@ static bool leonos_script_async_blocks_later(hlcache_handle *script)
             throw "Could not patch NetSurf async script order execution."
         }
         $ScriptText = $ScriptText.Replace($OldExec, $NewExec)
+        [System.IO.File]::WriteAllText($ScriptSource, $ScriptText, [System.Text.Encoding]::ASCII)
+    }
+
+    if ($ScriptText -match 'leonos_script_async_blocks_later' -and
+        $ScriptText -notmatch 'ReactLanding\.') {
+        $OldRobloxAsyncBlocks = @'
+	        strstr(url, "ReactUtilities.") != NULL ||
+	        strstr(url, "ReactStyleGuide.") != NULL);
+'@
+        $OldRobloxAsyncBlocks = $OldRobloxAsyncBlocks -replace "`r`n", "`n"
+        $NewRobloxAsyncBlocks = @'
+	        strstr(url, "ReactUtilities.") != NULL ||
+	        strstr(url, "ReactStyleGuide.") != NULL ||
+	        strstr(url, "ReactLanding.") != NULL);
+'@
+        $NewRobloxAsyncBlocks = $NewRobloxAsyncBlocks -replace "`r`n", "`n"
+        if (-not $ScriptText.Contains($OldRobloxAsyncBlocks)) {
+            throw "Could not patch NetSurf Roblox async critical scripts."
+        }
+        $ScriptText = $ScriptText.Replace($OldRobloxAsyncBlocks, $NewRobloxAsyncBlocks)
         [System.IO.File]::WriteAllText($ScriptSource, $ScriptText, [System.Text.Encoding]::ASCII)
     }
 
@@ -3894,12 +3945,88 @@ monkey_window_redraw_scheduled(void *p)
 	}
 	monkey_window_redraw_content(gw, NULL);
 }
+
+#ifdef WITH_LEONOS_FETCHER
+void
+monkey_window_process_pending_redraws(void)
+{
+	RING_ITERATE_START(struct gui_window, gw_ring, c_ring) {
+		if (c_ring->redraw_scheduled && !c_ring->in_redraw) {
+			(void)monkey_schedule(-1, monkey_window_redraw_scheduled,
+					c_ring);
+			c_ring->redraw_scheduled = 0;
+			moutf(MOUT_WINDOW, "REDRAW_PENDING_DRAIN WIN %u",
+			      c_ring->win_num);
+			monkey_window_redraw_content(c_ring, NULL);
+		}
+	} RING_ITERATE_END(gw_ring, c_ring);
+}
+#endif
 '@
         $NewForward = $NewForward -replace "`r`n", "`n"
         if (-not $BrowserText.Contains($OldForward)) {
             throw "Could not patch NetSurf monkey browser redraw scheduler."
         }
         $BrowserText = $BrowserText.Replace($OldForward, $NewForward)
+    }
+    if ($BrowserText -notmatch 'monkey_window_process_pending_redraws') {
+        $OldPendingRedrawDrain = @'
+static void
+monkey_window_redraw_scheduled(void *p)
+{
+	struct gui_window *gw = p;
+	if (gw == NULL) {
+		return;
+	}
+	gw->redraw_scheduled = 0;
+	if (gw->in_redraw) {
+		monkey_window_request_redraw(gw);
+		return;
+	}
+	monkey_window_redraw_content(gw, NULL);
+}
+
+'@
+        $OldPendingRedrawDrain = $OldPendingRedrawDrain -replace "`r`n", "`n"
+        $NewPendingRedrawDrain = @'
+static void
+monkey_window_redraw_scheduled(void *p)
+{
+	struct gui_window *gw = p;
+	if (gw == NULL) {
+		return;
+	}
+	gw->redraw_scheduled = 0;
+	if (gw->in_redraw) {
+		monkey_window_request_redraw(gw);
+		return;
+	}
+	monkey_window_redraw_content(gw, NULL);
+}
+
+#ifdef WITH_LEONOS_FETCHER
+void
+monkey_window_process_pending_redraws(void)
+{
+	RING_ITERATE_START(struct gui_window, gw_ring, c_ring) {
+		if (c_ring->redraw_scheduled && !c_ring->in_redraw) {
+			(void)monkey_schedule(-1, monkey_window_redraw_scheduled,
+					c_ring);
+			c_ring->redraw_scheduled = 0;
+			moutf(MOUT_WINDOW, "REDRAW_PENDING_DRAIN WIN %u",
+			      c_ring->win_num);
+			monkey_window_redraw_content(c_ring, NULL);
+		}
+	} RING_ITERATE_END(gw_ring, c_ring);
+}
+#endif
+
+'@
+        $NewPendingRedrawDrain = $NewPendingRedrawDrain -replace "`r`n", "`n"
+        if (-not $BrowserText.Contains($OldPendingRedrawDrain)) {
+            throw "Could not patch NetSurf monkey browser pending redraw drain."
+        }
+        $BrowserText = $BrowserText.Replace($OldPendingRedrawDrain, $NewPendingRedrawDrain)
     }
     if ($BrowserText -notmatch 'monkey_window_redraw_scheduled, g') {
         $OldDestroy = @'
