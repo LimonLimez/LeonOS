@@ -3110,6 +3110,40 @@ static u8 user_heap_block_valid(u32 address)
                           USER_HEAP_BLOCK_HEADER_SIZE;
 }
 
+static void user_heap_trim_tail(void)
+{
+    u8 trimmed = 1u;
+    while (trimmed) {
+        trimmed = 0u;
+        u32 block_address = user_heap_first;
+        u32 previous_address = 0u;
+        u32 guard = 0u;
+        while (block_address != 0u && guard < 1048576u) {
+            if (!user_heap_block_valid(block_address)) {
+                serial_print("LeonOS user heap corrupt\r\n");
+                return;
+            }
+            struct UserHeapBlock *block =
+                    (struct UserHeapBlock *) block_address;
+            if (block->next == 0u) {
+                if (block->free) {
+                    user_heap_next = block_address;
+                    if (previous_address != 0u) {
+                        ((struct UserHeapBlock *) previous_address)->next = 0u;
+                    } else {
+                        user_heap_first = 0u;
+                    }
+                    trimmed = 1u;
+                }
+                break;
+            }
+            previous_address = block_address;
+            block_address = block->next;
+            guard += 1u;
+        }
+    }
+}
+
 static u32 user_syscall_malloc(u32 size)
 {
     if (size == 0u || user_heap_base == 0u) {
@@ -3218,6 +3252,7 @@ static u8 user_syscall_free(u32 user_ptr)
                     block_address = previous_address;
                 }
             }
+            user_heap_trim_tail();
             return 1u;
         }
         previous_address = block_address;

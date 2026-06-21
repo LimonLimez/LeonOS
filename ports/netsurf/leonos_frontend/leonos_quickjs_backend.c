@@ -22,8 +22,8 @@ extern void monkey_window_process_pending_redraws(void) __attribute__((weak));
 
 #define LEONOS_QUICKJS_FETCH_MAX (512u * 1024u)
 #define LEONOS_QUICKJS_JOB_LIMIT 128u
-#define LEONOS_QUICKJS_MEMORY_LIMIT (64u * 1024u * 1024u)
-#define LEONOS_QUICKJS_GC_THRESHOLD (8u * 1024u * 1024u)
+#define LEONOS_QUICKJS_MEMORY_LIMIT (128u * 1024u * 1024u)
+#define LEONOS_QUICKJS_GC_THRESHOLD (32u * 1024u * 1024u)
 #define LEONOS_QUICKJS_STACK_LIMIT (6u * 1024u * 1024u)
 
 struct jsheap {
@@ -123,7 +123,6 @@ static uint32_t qjs_script_interrupt_limit(const jsheap *heap, size_t bytes,
 	    strstr(name, "js.rbxcdn.com/") != NULL &&
 	    (strstr(name, "SearchLandingPage.") != NULL ||
 	     strstr(name, "AngularJsUtilities.") != NULL ||
-	     strstr(name, "CoreUtilities.") != NULL ||
 	     strstr(name, "Thumbnails.") != NULL ||
 	     strstr(name, "GameCarousel.") != NULL ||
 	     strstr(name, "ReactLanding.") != NULL ||
@@ -187,7 +186,8 @@ static bool qjs_should_skip_blocking_script(const char *name,
 	/* These Roblox route bundles can monopolize QuickJS compile pre-paint. */
 	if (name != NULL &&
 	    (strstr(name, "Challenge.js") != NULL ||
-	     strstr(name, "CoreUtilities.js") != NULL ||
+	     strstr(name, "ReactStyleGuide.js") != NULL ||
+	     strstr(name, "63b59480fef503ff6648900d1051bae7531757a38ce24f77587552fca279d16c") != NULL ||
 	     strstr(name, "UserProfiles.js") != NULL ||
 	     strstr(name, "Navigation.js") != NULL ||
 	     strstr(name, "Sentry.js") != NULL ||
@@ -213,8 +213,10 @@ static bool qjs_should_skip_blocking_script(const char *name,
 	if (bytes < 64u * 1024u) {
 		return false;
 	}
+	if (qjs_mem_contains(source, bytes, "bundle: intl-polyfill")) {
+		return true;
+	}
 	return qjs_mem_contains(source, bytes, "bundleDetected(\"UserProfiles\")") ||
-	       qjs_mem_contains(source, bytes, "bundleDetected(\"CoreUtilities\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"Navigation\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"Sentry\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"PresenceStatus\")") ||
@@ -223,6 +225,7 @@ static bool qjs_should_skip_blocking_script(const char *name,
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"VerificationUpsell\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"EmailVerifyCodeModal\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"Captcha\")") ||
+	       qjs_mem_contains(source, bytes, "bundleDetected(\"ReactStyleGuide\")") ||
 	       (qjs_mem_contains(source, bytes, "bundleDetected(\"StyleGuide\")") &&
 		!qjs_mem_contains(source, bytes, "bundleDetected(\"ReactStyleGuide\")")) ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"Builder\")") ||
@@ -5431,8 +5434,10 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"g.Intl.getCanonicalLocales=g.Intl.getCanonicalLocales||function(a){return intlList(a);};"
 		"try{RegExp.input=RegExp.input||'';RegExp.leftContext=RegExp.leftContext||'';RegExp.lastMatch=RegExp.lastMatch||'';"
 		"RegExp.multiline=!!RegExp.multiline;for(var rx=1;rx<=9;rx++)if(RegExp['$'+rx]===void 0)RegExp['$'+rx]='';}catch(e){}"
-		"function store(){var s={};return {getItem:function(k){k=String(k);return s.hasOwnProperty(k)?s[k]:null;},"
-		"setItem:function(k,v){s[String(k)]=String(v);},removeItem:function(k){delete s[String(k)];},clear:function(){s={};}};}"
+		"function store(){var s={},o={getItem:function(k){k=String(k);return s.hasOwnProperty(k)?s[k]:null;},"
+		"setItem:function(k,v){s[String(k)]=String(v);},removeItem:function(k){delete s[String(k)];},clear:function(){s={};},"
+		"key:function(i){var a=Object.keys(s);i=Number(i)||0;return i>=0&&i<a.length?a[i]:null;}};"
+		"try{Object.defineProperty(o,'length',{get:function(){return Object.keys(s).length;}});}catch(e){o.length=0;}return o;}"
 		"g.localStorage=g.localStorage||store();g.sessionStorage=g.sessionStorage||store();"
 		"g.isSecureContext=g.isSecureContext!==void 0?g.isSecureContext:true;"
 		"g.TextEncoder=g.TextEncoder||function(){};g.TextEncoder.prototype.encode=g.TextEncoder.prototype.encode||function(s){"
@@ -6210,6 +6215,71 @@ static bool qjs_replace_roblox_react_landing(const char *name,
 	return true;
 }
 
+static bool qjs_replace_between_markers(char **eval_copy, size_t *eval_len,
+					const char *start_marker,
+					const char *end_marker,
+					const char *replacement)
+{
+	char *start;
+	char *end;
+	char *next;
+	size_t prefix;
+	size_t suffix_len;
+	size_t replacement_len;
+	size_t next_len;
+	if (eval_copy == NULL || *eval_copy == NULL || eval_len == NULL ||
+	    start_marker == NULL || end_marker == NULL ||
+	    replacement == NULL) {
+		return false;
+	}
+	start = strstr(*eval_copy, start_marker);
+	if (start == NULL) {
+		return false;
+	}
+	end = strstr(start, end_marker);
+	if (end == NULL || end <= start) {
+		return false;
+	}
+	prefix = (size_t)(start - *eval_copy);
+	suffix_len = *eval_len - (size_t)(end - *eval_copy);
+	replacement_len = strlen(replacement);
+	next_len = prefix + replacement_len + suffix_len;
+	next = malloc(next_len + 1u);
+	if (next == NULL) {
+		return false;
+	}
+	memcpy(next, *eval_copy, prefix);
+	memcpy(next + prefix, replacement, replacement_len);
+	memcpy(next + prefix + replacement_len, end, suffix_len);
+	next[next_len] = 0;
+	free(*eval_copy);
+	*eval_copy = next;
+	*eval_len = next_len;
+	return true;
+}
+
+static bool qjs_prune_roblox_coreutilities_optional_bootstrap(
+	const char *name, char **eval_copy, size_t *eval_len)
+{
+	bool changed;
+	if (name == NULL || eval_copy == NULL || *eval_copy == NULL ||
+	    eval_len == NULL ||
+	    strstr(name, "js.rbxcdn.com/") == NULL ||
+	    strstr(name, "CoreUtilities.js") == NULL) {
+		return false;
+	}
+	changed = qjs_replace_between_markers(eval_copy, eval_len,
+		"rl(void 0,void 0,void 0,function(){var e;return rf(this,function(t){return null===document.getElementById(\"chef-boy-ardee\")",
+		"var it=function(e){return rl(void 0,[e],void 0,function(e){var t=e.challengeBaseProperties",
+		"console.log('LEONOS COREUTIL optional chef bootstrap skipped');");
+#ifdef LEONOS_USER_APP
+	if (changed) {
+		leonos_write("NETSURF QUICKJS COREUTIL optional chef skipped\r\n");
+	}
+#endif
+	return changed;
+}
+
 static bool qjs_inject_gamecarousel_probe(const char *name, char **eval_copy,
 					  size_t *eval_len)
 {
@@ -6558,6 +6628,10 @@ bool js_exec(jsthread *thread, const uint8_t *txt, size_t txtlen,
 		eval_text = eval_copy;
 	}
 	if (qjs_replace_roblox_react_landing(name, &eval_copy, &eval_len)) {
+		eval_text = eval_copy;
+	}
+	if (qjs_prune_roblox_coreutilities_optional_bootstrap(name, &eval_copy,
+							     &eval_len)) {
 		eval_text = eval_copy;
 	}
 	if (qjs_should_skip_blocking_script(name, eval_text, eval_len)) {

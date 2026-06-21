@@ -679,6 +679,15 @@ void *malloc(size_t size)
     return raw + LEONOS_ALLOC_HEADER_SIZE;
 }
 
+size_t malloc_usable_size(void *ptr)
+{
+    if (ptr == NULL) {
+        return 0u;
+    }
+    unsigned char *raw = (unsigned char *) ptr - LEONOS_ALLOC_HEADER_SIZE;
+    return *((size_t *) raw);
+}
+
 void free(void *ptr)
 {
 #ifdef LEONOS_USER_APP

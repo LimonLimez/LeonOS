@@ -5223,8 +5223,6 @@ function Get-LeonOsNetSurfMonkeyConfig {
             @(
                 "LEONOS_NETSURF_QUICKJS_CORE",
                 "LEONOS_QUICKJS_NO_ATOMICS",
-                "LEONOS_QUICKJS_NO_STACK_CHECK",
-                "LEONOS_QUICKJS_NO_MALLOC_USABLE_SIZE",
                 "alloca=__builtin_alloca",
                 "CONFIG_VERSION=\`"$QuickJsVersion\`"",
                 "_GNU_SOURCE"
@@ -5376,9 +5374,14 @@ function Invoke-LeonOsCompile {
     if ($Toolchain.Kind -eq "clang-lld") {
         $Args += "--target=i686-elf"
     }
+    $Optimize = "-Os"
+    if ($UseQuickJsCoreBuild -and
+        $Source.StartsWith($QuickJsSource, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $Optimize = "-O2"
+    }
     $Args += @(
         "-std=c99",
-        "-Os",
+        $Optimize,
         "-ffreestanding",
         "-fno-builtin",
         "-fno-stack-protector",
