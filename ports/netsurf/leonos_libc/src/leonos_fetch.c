@@ -495,6 +495,13 @@ static bool leonos_fetch_url_is_deferred_tracker(const char *url)
             strstr(url, "analytics.google.com/") != NULL);
 }
 
+static bool leonos_fetch_url_is_roblox_optional_prelude(const char *url)
+{
+    return url != NULL &&
+           strstr(url,
+               "apis.roblox.com/rotating-client-service/v1/prelude/") != NULL;
+}
+
 static bool leonos_fetch_url_is_roblox_deferred_bundle(const char *url)
 {
     if (url == NULL || strstr(url, "rbxcdn.com/") == NULL) {
@@ -1326,7 +1333,12 @@ static void *leonos_fetch_setup(struct fetch *parent_fetch, nsurl *url,
     if (leonos_fetch_next_order == 0u) {
         leonos_fetch_next_order = 1u;
     }
-    if (!leonos_fetch_url_looks_subresource(nsurl_access(url))) {
+    if (leonos_fetch_url_is_roblox_optional_prelude(nsurl_access(url))) {
+        ctx->synthetic_empty = true;
+        ctx->status_code = 200u;
+        (void) snprintf(ctx->content_type, sizeof(ctx->content_type),
+                "application/javascript");
+    } else if (!leonos_fetch_url_looks_subresource(nsurl_access(url))) {
         leonos_fetch_css_count = 0u;
         leonos_fetch_js_count = 0u;
         leonos_fetch_next_order = 1u;

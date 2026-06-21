@@ -22,6 +22,9 @@ extern void monkey_window_process_pending_redraws(void) __attribute__((weak));
 
 #define LEONOS_QUICKJS_FETCH_MAX (512u * 1024u)
 #define LEONOS_QUICKJS_JOB_LIMIT 128u
+#define LEONOS_QUICKJS_MEMORY_LIMIT (64u * 1024u * 1024u)
+#define LEONOS_QUICKJS_GC_THRESHOLD (8u * 1024u * 1024u)
+#define LEONOS_QUICKJS_STACK_LIMIT (6u * 1024u * 1024u)
 
 struct jsheap {
 	JSRuntime *runtime;
@@ -184,6 +187,7 @@ static bool qjs_should_skip_blocking_script(const char *name,
 	/* These Roblox route bundles can monopolize QuickJS compile pre-paint. */
 	if (name != NULL &&
 	    (strstr(name, "Challenge.js") != NULL ||
+	     strstr(name, "CoreUtilities.js") != NULL ||
 	     strstr(name, "UserProfiles.js") != NULL ||
 	     strstr(name, "Navigation.js") != NULL ||
 	     strstr(name, "Sentry.js") != NULL ||
@@ -210,6 +214,7 @@ static bool qjs_should_skip_blocking_script(const char *name,
 		return false;
 	}
 	return qjs_mem_contains(source, bytes, "bundleDetected(\"UserProfiles\")") ||
+	       qjs_mem_contains(source, bytes, "bundleDetected(\"CoreUtilities\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"Navigation\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"Sentry\")") ||
 	       qjs_mem_contains(source, bytes, "bundleDetected(\"PresenceStatus\")") ||
@@ -1678,6 +1683,79 @@ static void qjs_copy_js_string(char *dst, size_t dst_len,
 	JS_FreeCString(ctx, text);
 }
 
+static bool qjs_js_prop_contains(JSContext *ctx, JSValueConst obj,
+				 const char *prop, const char *needle)
+{
+	JSValue value;
+	char text[1024];
+	bool found;
+	if (!JS_IsObject(obj) || prop == NULL || needle == NULL) {
+		return false;
+	}
+	value = JS_GetPropertyStr(ctx, obj, prop);
+	qjs_copy_js_string(text, sizeof(text), ctx, value);
+	JS_FreeValue(ctx, value);
+	found = strstr(text, needle) != NULL;
+	return found;
+}
+
+static bool qjs_native_attr_contains(dom_node *node, const char *attr,
+				     const char *needle)
+{
+	dom_string *value = NULL;
+	char text[1024];
+	bool found;
+	if (node == NULL || attr == NULL || needle == NULL ||
+	    qjs_native_node_type(node) != DOM_ELEMENT_NODE) {
+		return false;
+	}
+	qjs_read_dom_attribute((dom_element *) node, attr, &value);
+	if (value == NULL) {
+		return false;
+	}
+	qjs_copy_dom_string_cstr(text, sizeof(text), value);
+	dom_string_unref(value);
+	found = strstr(text, needle) != NULL;
+	return found;
+}
+
+static bool qjs_is_roblox_optional_prelude_insert(JSContext *ctx,
+						 JSValueConst child_value,
+						 dom_node *child_node)
+{
+	static const char prelude_path[] =
+		"rotating-client-service/v1/prelude/";
+	return qjs_js_prop_contains(ctx, child_value, "src", prelude_path) ||
+	       qjs_native_attr_contains(child_node, "src", prelude_path);
+}
+
+static bool qjs_active_script_is_roblox_coreutilities(JSContext *ctx)
+{
+	jsthread *thread = JS_GetContextOpaque(ctx);
+	const char *name = thread != NULL ? thread->active_script_name : NULL;
+	return name != NULL &&
+	       strstr(name, "js.rbxcdn.com/") != NULL &&
+	       strstr(name, "CoreUtilities.js") != NULL;
+}
+
+static bool qjs_is_roblox_optional_bootstrap_id(const char *id)
+{
+	return id != NULL &&
+	       (strcmp(id, "chef-boy-ardee") == 0 ||
+		strcmp(id, "prelude") == 0);
+}
+
+static void qjs_log_optional_script_insert_skip(const char *op)
+{
+#ifdef LEONOS_USER_APP
+	leonos_write("NETSURF QUICKJS DOM skip optional prelude ");
+	leonos_write(op != NULL ? op : "insert");
+	leonos_write("\r\n");
+#else
+	(void) op;
+#endif
+}
+
 static void qjs_css_property_name(char *dst, size_t dst_len, const char *name)
 {
 	size_t out = 0u;
@@ -2785,6 +2863,7 @@ static JSValue qjs_native_append_child(JSContext *ctx, JSValueConst this_val,
 	struct qjs_native_node *child;
 	dom_node *materialized_child = NULL;
 	dom_node *result = NULL;
+	bool skip_child_sync = false;
 	if (argc < 1) {
 		return JS_UNDEFINED;
 	}
@@ -2804,6 +2883,11 @@ static JSValue qjs_native_append_child(JSContext *ctx, JSValueConst this_val,
 		dom_node *native_child = child != NULL && child->node != NULL ?
 			child->node : materialized_child;
 		if (native_child != NULL &&
+		    qjs_is_roblox_optional_prelude_insert(ctx, argv[0],
+							  native_child)) {
+			qjs_log_optional_script_insert_skip("appendChild");
+			skip_child_sync = true;
+		} else if (native_child != NULL &&
 		    dom_node_append_child(parent->node, native_child,
 					  &result) == DOM_NO_ERR) {
 			if (result != NULL) {
@@ -2819,6 +2903,9 @@ static JSValue qjs_native_append_child(JSContext *ctx, JSValueConst this_val,
 	}
 	if (materialized_child != NULL) {
 		dom_node_unref(materialized_child);
+	}
+	if (skip_child_sync) {
+		return JS_DupValue(ctx, argv[0]);
 	}
 	if (qjs_js_node_is_document_fragment(ctx, argv[0])) {
 		qjs_sync_js_fragment_insert_before(ctx, this_val, argv[0],
@@ -2837,6 +2924,7 @@ static JSValue qjs_native_insert_before(JSContext *ctx, JSValueConst this_val,
 	struct qjs_native_node *ref = NULL;
 	dom_node *materialized_child = NULL;
 	dom_node *result = NULL;
+	bool skip_child_sync = false;
 	if (argc < 1) {
 		return JS_UNDEFINED;
 	}
@@ -2859,6 +2947,11 @@ static JSValue qjs_native_insert_before(JSContext *ctx, JSValueConst this_val,
 		dom_node *native_child = child != NULL && child->node != NULL ?
 			child->node : materialized_child;
 		if (native_child != NULL &&
+		    qjs_is_roblox_optional_prelude_insert(ctx, argv[0],
+							  native_child)) {
+			qjs_log_optional_script_insert_skip("insertBefore");
+			skip_child_sync = true;
+		} else if (native_child != NULL &&
 		    dom_node_insert_before(parent->node, native_child,
 					   ref != NULL ? ref->node : NULL,
 					   &result) == DOM_NO_ERR &&
@@ -2874,6 +2967,9 @@ static JSValue qjs_native_insert_before(JSContext *ctx, JSValueConst this_val,
 	}
 	if (materialized_child != NULL) {
 		dom_node_unref(materialized_child);
+	}
+	if (skip_child_sync) {
+		return JS_DupValue(ctx, argv[0]);
 	}
 	if (qjs_js_node_is_document_fragment(ctx, argv[0])) {
 		qjs_sync_js_fragment_insert_before(ctx, this_val, argv[0],
@@ -2916,6 +3012,7 @@ static JSValue qjs_native_replace_child(JSContext *ctx, JSValueConst this_val,
 	struct qjs_native_node *old_child;
 	dom_node *materialized_child = NULL;
 	dom_node *result = NULL;
+	bool skip_child_sync = false;
 	if (argc < 2) {
 		return JS_UNDEFINED;
 	}
@@ -2932,28 +3029,37 @@ static JSValue qjs_native_replace_child(JSContext *ctx, JSValueConst this_val,
 		materialized_child = qjs_materialize_js_node(ctx, argv[0]);
 		new_child = qjs_get_native_or_materialized_node(ctx, argv[0]);
 	}
-	if (parent != NULL && parent->node != NULL &&
-	    ((new_child != NULL && new_child->node != NULL) ||
-	     materialized_child != NULL) &&
-	    old_child != NULL && old_child->node != NULL &&
-	    dom_node_replace_child(parent->node,
-				   new_child != NULL && new_child->node != NULL ?
-					   new_child->node : materialized_child,
-				   old_child->node, &result) == DOM_NO_ERR) {
-		if (result != NULL) {
-			dom_node_unref(result);
+	if (parent != NULL && parent->node != NULL) {
+		dom_node *native_child =
+			new_child != NULL && new_child->node != NULL ?
+				new_child->node : materialized_child;
+		if (native_child != NULL &&
+		    qjs_is_roblox_optional_prelude_insert(ctx, argv[0],
+							  native_child)) {
+			qjs_log_optional_script_insert_skip("replaceChild");
+			skip_child_sync = true;
+		} else if (native_child != NULL &&
+			   old_child != NULL && old_child->node != NULL &&
+			   dom_node_replace_child(parent->node,
+						  native_child,
+						  old_child->node,
+						  &result) == DOM_NO_ERR) {
+			if (result != NULL) {
+				dom_node_unref(result);
+			}
+			qjs_log_native_dom_mutation(ctx, "replaceChild",
+						    parent->node,
+						    native_child);
+			qjs_maybe_remember_react_landing_subtree(ctx,
+								 parent->node);
+			qjs_note_native_node_inserted(ctx, native_child);
 		}
-		qjs_log_native_dom_mutation(ctx, "replaceChild",
-			parent->node,
-			new_child != NULL && new_child->node != NULL ?
-				new_child->node : materialized_child);
-		qjs_maybe_remember_react_landing_subtree(ctx, parent->node);
-		qjs_note_native_node_inserted(ctx,
-			new_child != NULL && new_child->node != NULL ?
-				new_child->node : materialized_child);
 	}
 	if (materialized_child != NULL) {
 		dom_node_unref(materialized_child);
+	}
+	if (skip_child_sync) {
+		return JS_DupValue(ctx, argv[1]);
 	}
 	if (qjs_js_node_is_document_fragment(ctx, argv[0])) {
 		qjs_sync_js_fragment_insert_before(ctx, this_val, argv[0],
@@ -4853,6 +4959,7 @@ static JSValue qjs_document_get_element_by_id(JSContext *ctx,
 	const char *id_text;
 	dom_string *id = NULL;
 	dom_element *element = NULL;
+	bool synthetic_optional_bootstrap = false;
 	(void) this_val;
 	if (thread == NULL || thread->htmlc == NULL ||
 	    thread->htmlc->document == NULL || argc < 1) {
@@ -4869,21 +4976,33 @@ static JSValue qjs_document_get_element_by_id(JSContext *ctx,
 						      &element);
 		dom_string_unref(id);
 	}
+	if (element == NULL &&
+	    qjs_active_script_is_roblox_coreutilities(ctx) &&
+	    qjs_is_roblox_optional_bootstrap_id(id_text)) {
+		synthetic_optional_bootstrap = true;
+	}
 #ifdef LEONOS_USER_APP
 	static unsigned int get_id_log_count;
 	if (get_id_log_count < 8u) {
 		get_id_log_count += 1u;
 		leonos_write("NETSURF QUICKJS GETELEMENT ");
 		leonos_write(id_text);
-		leonos_write(element != NULL ? " hit\r\n" : " miss\r\n");
+		leonos_write(element != NULL || synthetic_optional_bootstrap ?
+			     " hit\r\n" : " miss\r\n");
 	}
 #endif
-	JS_FreeCString(ctx, id_text);
 	if (element != NULL) {
 		JSValue obj = qjs_new_dom_element(ctx, element);
 		dom_node_unref(element);
+		JS_FreeCString(ctx, id_text);
 		return obj;
 	}
+	if (synthetic_optional_bootstrap) {
+		JSValue obj = qjs_new_basic_element(ctx, "SCRIPT", id_text, "");
+		JS_FreeCString(ctx, id_text);
+		return obj;
+	}
+	JS_FreeCString(ctx, id_text);
 	return JS_NULL;
 }
 
@@ -5265,9 +5384,24 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"g.clearInterval=g.clearInterval||noop;"
 		"g.requestAnimationFrame=g.requestAnimationFrame||function(f){return g.setTimeout(f,16);};"
 		"g.cancelAnimationFrame=g.cancelAnimationFrame||g.clearTimeout;"
+		"g.queueMicrotask=g.queueMicrotask||function(f){return Promise.resolve().then(f);};"
+		"var idleCalls=0;g.requestIdleCallback=g.requestIdleCallback||function(f){var id=nextTimer++;"
+		"if(typeof f==='function'&&idleCalls<4){idleCalls++;g.setTimeout(function(){f({didTimeout:false,timeRemaining:function(){return 0;}});},1);}return id;};"
+		"g.cancelIdleCallback=g.cancelIdleCallback||g.clearTimeout;"
 		"g.innerWidth=g.innerWidth||1440;g.innerHeight=g.innerHeight||900;"
-		"g.performance=g.performance||{};g.performance.now=g.performance.now||function(){return 0;};"
-		"g.performance.timing=g.performance.timing||{navigationStart:0};"
+		"var perf=g.performance=g.performance||{},perfEntries=[],perfOrigin=Date.now?Date.now():0;"
+		"perf.now=perf.now||function(){return (Date.now?Date.now():perfOrigin)-perfOrigin;};"
+		"perf.timeOrigin=perf.timeOrigin||perfOrigin;perf.timing=perf.timing||{navigationStart:perfOrigin};"
+		"function perfEntry(n,t,s,d){return {name:String(n||''),entryType:String(t||''),startTime:Number(s||0)||0,duration:Number(d||0)||0};}"
+		"perf.mark=perf.mark||function(n,o){var e=perfEntry(n,'mark',o&&typeof o.startTime==='number'?o.startTime:perf.now(),0);perfEntries.push(e);return e;};"
+		"perf.measure=perf.measure||function(n,a,b){function f(x){for(var i=perfEntries.length-1;i>=0;i--)if(perfEntries[i].name===x)return perfEntries[i];return null;}"
+		"var s=0,e=perf.now(),m;if(typeof a==='string'&&(m=f(a)))s=m.startTime;else if(a&&typeof a.start==='number')s=a.start;"
+		"if(typeof b==='string'&&(m=f(b)))e=m.startTime;else if(a&&typeof a.end==='number')e=a.end;m=perfEntry(n,'measure',s,Math.max(0,e-s));perfEntries.push(m);return m;};"
+		"perf.getEntries=perf.getEntries||function(){return perfEntries.slice();};"
+		"perf.getEntriesByType=perf.getEntriesByType||function(t){t=String(t||'');return perfEntries.filter(function(e){return e.entryType===t;});};"
+		"perf.getEntriesByName=perf.getEntriesByName||function(n,t){n=String(n||'');return perfEntries.filter(function(e){return e.name===n&&(!t||e.entryType===String(t));});};"
+		"perf.clearMarks=perf.clearMarks||function(n){perfEntries=perfEntries.filter(function(e){return e.entryType!=='mark'||(n&&e.name!==String(n));});};"
+		"perf.clearMeasures=perf.clearMeasures||function(n){perfEntries=perfEntries.filter(function(e){return e.entryType!=='measure'||(n&&e.name!==String(n));});};"
 		"g.Intl=g.Intl||{};function intlList(a){return Array.isArray(a)?a:(a==null?[]:[String(a)]);}"
 		"function intlLocale(l){var a=intlList(l);return String(a[0]||'en-US');}"
 		"function intlDate(v){try{var d=v instanceof Date?v:new Date(v==null?Date.now():v);return isNaN(d.getTime())?'Invalid Date':d.toISOString();}catch(e){return '';}}"
@@ -5310,11 +5444,12 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"cr.randomUUID=cr.randomUUID||function(){var b=new Uint8Array(16);cr.getRandomValues(b);b[6]=(b[6]&15)|64;b[8]=(b[8]&63)|128;"
 		"var h=[];for(var i=0;i<16;i++)h[i]=b[i].toString(16).padStart(2,'0');return h[0]+h[1]+h[2]+h[3]+'-'+h[4]+h[5]+'-'+h[6]+h[7]+'-'+h[8]+h[9]+'-'+h[10]+h[11]+h[12]+h[13]+h[14]+h[15];};"
 		"function bytes(n){var a=new Uint8Array(n);cr.getRandomValues(a);return a.buffer;}"
+		"function subtleUnsupported(){return Promise.reject(Error('NotSupportedError'));}"
 		"cr.subtle=cr.subtle||{};cr.subtle.digest=cr.subtle.digest||function(){return Promise.resolve(bytes(32));};"
-		"cr.subtle.generateKey=cr.subtle.generateKey||function(){return Promise.resolve({publicKey:{type:'public'},privateKey:{type:'private'}});};"
-		"cr.subtle.exportKey=cr.subtle.exportKey||function(){return Promise.resolve(bytes(65));};"
+		"cr.subtle.generateKey=cr.subtle.generateKey||subtleUnsupported;"
+		"cr.subtle.exportKey=cr.subtle.exportKey||subtleUnsupported;"
 		"cr.subtle.importKey=cr.subtle.importKey||function(){return Promise.resolve({type:'public'});};"
-		"cr.subtle.sign=cr.subtle.sign||function(){return Promise.resolve(bytes(64));};cr.subtle.verify=cr.subtle.verify||function(){return Promise.resolve(false);};"
+		"cr.subtle.sign=cr.subtle.sign||subtleUnsupported;cr.subtle.verify=cr.subtle.verify||subtleUnsupported;"
 		"g.msCrypto=g.msCrypto||cr;"
 		"g.matchMedia=g.matchMedia||function(q){return {matches:false,media:String(q||''),onchange:null,"
 		"addEventListener:noop,removeEventListener:noop,addListener:noop,removeListener:noop,dispatchEvent:function(){return true;}};};"
@@ -5365,6 +5500,8 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"if(g.Request&&!g.Request.prototype.clone)g.Request.prototype.clone=function(){return new g.Request(this,{method:this.method,headers:this.headers,body:this._body});};"
 		"if(g.Request&&!g.Request.prototype.text)g.Request.prototype.text=function(){this.bodyUsed=true;return Promise.resolve(this._body||'');};"
 		"if(!g.fetch&&g._leonosFetchText)g.fetch=function(input,init){var q=reqData(input,init||{});try{return Promise.resolve(leonosResp(g._leonosFetchText(q.url,q.method,q.body,q.contentType,q.accept),q.url));}catch(e){return Promise.reject(e);}};"
+		"var nav=g.navigator=g.navigator||{},beaconCalls=0;nav.sendBeacon=nav.sendBeacon||function(u,d){try{absUrl(u||'');"
+		"beaconCalls++;return beaconCalls<=32;}catch(e){return false;}};"
 		"function xhrFire(x,t){return x.dispatchEvent?x.dispatchEvent(evtObj(t)):true;}"
 		"if(!g.XMLHttpRequest&&g._leonosFetchText){var XHR=function(){eventful(this);this.readyState=0;this.responseType='';this.responseText='';this.response=null;this.responseURL='';this.status=0;this.statusText='';this.timeout=0;this.withCredentials=false;this.upload=eventful({});this._headers={};this._respHeaders={};};"
 		"XHR.UNSENT=0;XHR.OPENED=1;XHR.HEADERS_RECEIVED=2;XHR.LOADING=3;XHR.DONE=4;var xp=XHR.prototype;xp.UNSENT=0;xp.OPENED=1;xp.HEADERS_RECEIVED=2;xp.LOADING=3;xp.DONE=4;"
@@ -5455,6 +5592,8 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"g.Event.prototype.preventDefault=function(){this.defaultPrevented=true;};"
 		"g.CustomEvent=g.CustomEvent||function(t,i){g.Event.call(this,t,i);this.detail=i&&i.detail;};"
 		"g.CustomEvent.prototype=Object.create(g.Event.prototype);g.CustomEvent.prototype.constructor=g.CustomEvent;"
+		"g.FontFace=g.FontFace||function(f,s,d){this.family=String(f||'');this.source=s;this.descriptors=d||{};this.status='unloaded';this.loaded=Promise.resolve(this);};"
+		"g.FontFace.prototype.load=g.FontFace.prototype.load||function(){this.status='loaded';return this.loaded;};"
 		"rb.EnvironmentUrls=rb.EnvironmentUrls||{};var eu=rb.EnvironmentUrls;"
 		"eu.websiteUrl=eu.websiteUrl||'https://www.roblox.com';eu.domain=eu.domain||'roblox.com';"
 		"eu.apiGatewayUrl=eu.apiGatewayUrl||'https://apis.roblox.com';eu.catalogApi=eu.catalogApi||'https://catalog.roblox.com';"
@@ -5613,6 +5752,11 @@ static void qjs_install_browser_bootstrap(JSContext *ctx)
 		"d.body.clientWidth=d.body.clientWidth||g.innerWidth;d.body.clientHeight=d.body.clientHeight||g.innerHeight;"
 		"d.documentElement.appendChild(d.head);d.documentElement.appendChild(d.body);"
 		"g.getComputedStyle=g.getComputedStyle||function(e){return (e&&e.style)||css();};"
+		"function fontSet(){var fs=[];fs.status='loaded';fs.ready=Promise.resolve(fs);"
+		"fs.load=function(){return Promise.resolve([]);};fs.check=function(){return true;};"
+		"fs.add=function(f){if(fs.indexOf(f)<0)fs.push(f);return fs;};fs.delete=function(f){var i=fs.indexOf(f);if(i>=0)fs.splice(i,1);return i>=0;};"
+		"fs.clear=function(){fs.length=0;};eventful(fs);return fs;}"
+		"d.fonts=d.fonts||g.fonts||fontSet();g.fonts=g.fonts||d.fonts;"
 		"g.history=g.history||{pushState:noop,replaceState:noop,back:noop,forward:noop};"
 		"})(globalThis);";
 	JSValue result = JS_Eval(ctx, bootstrap, sizeof(bootstrap) - 1u,
@@ -5698,10 +5842,17 @@ static void qjs_maybe_run_selector_selftest(JSContext *ctx)
 		"strong.matches('span.a + strong.after')&&!em.matches('strong.after')&&"
 		"closestRoot&&closestRoot.id==='selector-root'&&closestSpan&&"
 		"String(closestSpan.className||'').indexOf('a')>=0&&!em.closest('strong.after');"
+		"var webApiOk=false;try{performance.mark('leonos-webapi');"
+		"performance.measure('leonos-webapi-span','leonos-webapi');"
+		"webApiOk=typeof queueMicrotask==='function'&&typeof requestIdleCallback==='function'&&"
+		"typeof navigator.sendBeacon==='function'&&document.fonts&&typeof document.fonts.load==='function'&&"
+		"typeof FontFace==='function'&&performance.getEntriesByName('leonos-webapi','mark').length===1&&"
+		"performance.getEntriesByType('measure').length>=1;}catch(apiErr){webApiOk=false;}"
+		"console.log('NETSURF QUICKJS WEBAPI SELFTEST '+(webApiOk?'ok':'fail'));"
 		"var ok=direct.length===1&&isLeaf(direct[0])&&desc.length===1&&"
 		"isLeaf(desc[0])&&adjacent.length===1&&isStrong(adjacent[0])&&"
 		"general.length===1&&isStrong(general[0])&&negated.length===1&&"
-		"isLeaf(negated[0])&&matchOk&&methodOk;"
+		"isLeaf(negated[0])&&matchOk&&methodOk&&webApiOk;"
 		"if(root.parentNode&&root.parentNode.removeChild)root.parentNode.removeChild(root);"
 		"console.log('NETSURF QUICKJS SELECTOR SELFTEST '+(ok?'ok':'fail'));"
 		"return ok?'ok':'fail';"
@@ -5919,21 +6070,12 @@ static void qjs_boost_route_timer_budget(JSContext *ctx, const char *name)
 		"Math.max(Number(globalThis.__leonosExtraTimerBudget||0)||0,96);"
 		"globalThis.__leonosTimerDepthLimit="
 		"Math.max(Number(globalThis.__leonosTimerDepthLimit||2)||2,5);"
-		"if(globalThis.__leonosInstallRobloxHttp)globalThis.__leonosInstallRobloxHttp();"
-		"(function(g){function patch(R){if(!R||typeof R.useEffect!=='function'||R.__leonosChartsEffectShim)return;"
-		"var orig=R.useEffect;R.__leonosChartsEffectShim=true;g.__leonosRouteEffectRuns=g.__leonosRouteEffectRuns||0;"
-		"console.log('LEONOS ROUTE SHIM installed');"
-		"R.useEffect=function(fn,deps){try{if(typeof fn==='function'&&g.__leonosRouteEffectRuns<48){"
-		"var id=++g.__leonosRouteEffectRuns;Promise.resolve().then(function(){try{console.log('LEONOS ROUTE EFFECT run '+id);fn();}"
-		"catch(e){try{g._DumpException(e);}catch(x){}}});}}catch(e){}return orig.apply(this,arguments);};}"
-		"if(g.React)patch(g.React);else if(Object.defineProperty&&!g.__leonosReactSetter){g.__leonosReactSetter=true;"
-		"var rv;Object.defineProperty(g,'React',{configurable:true,get:function(){return rv;},set:function(v){rv=v;patch(v);}});}})(globalThis);";
+		"if(globalThis.__leonosInstallRobloxHttp)globalThis.__leonosInstallRobloxHttp();";
 	JSValue result;
 
 	if (ctx == NULL || name == NULL ||
 	    strstr(name, "js.rbxcdn.com/") == NULL ||
 	    (strstr(name, "GameCarousel.") == NULL &&
-	     strstr(name, "ReactLanding.") == NULL &&
 	     strstr(name, "SearchLandingPage.") == NULL)) {
 		return;
 	}
@@ -6003,6 +6145,69 @@ static void qjs_run_roblox_thumbnail_probe(JSContext *ctx, const char *name)
 			"leonos-quickjs-roblox-thumbnail-probe.js");
 	}
 	JS_FreeValue(ctx, result);
+}
+
+static bool qjs_replace_roblox_react_landing(const char *name,
+					     char **eval_copy,
+					     size_t *eval_len)
+{
+	static const char fallback[] =
+		"(function(g){try{"
+		"console.log('NETSURF QUICKJS ROUTE PROBE early fallback');"
+		"var d=g.document;if(!d||!d.createElement)return;"
+		"function host(){var h=null,b=null;try{h=d.getElementById&&d.getElementById('react-landing-container');}catch(e){}"
+		"if(h&&h.appendChild)return h;try{b=d.getElementsByTagName&&d.getElementsByTagName('body');"
+		"h=b&&b.length?b[0]:null;}catch(e){}return (h&&h.appendChild)?h:(d.body||d.documentElement);}"
+		"function addText(t,c){var h=host(),e=d.createElement('div');if(!h||!e)return;"
+		"e.className=c||'leonos-roblox-landing-text';e.textContent=t;if(e.style){e.style.display='block';"
+		"e.style.margin='10px 0';e.style.fontSize=c==='hero'?'28px':'18px';}h.appendChild(e);}"
+		"addText('Create a new account','hero');addText('Discover millions of experiences','sub');"
+		"function appendImg(u){try{var h=host(),im=d.createElement('img');if(!h||!im||!u)return false;"
+		"im.src=u;im.alt='Roblox thumbnail';im.width=256;im.height=256;if(im.style){im.style.width='256px';"
+		"im.style.height='256px';im.style.display='block';im.style.margin='12px 0';}"
+		"if(im.setAttribute){im.setAttribute('src',u);im.setAttribute('alt','Roblox thumbnail');"
+		"im.setAttribute('width','256');im.setAttribute('height','256');}"
+		"h.appendChild(im);console.log('LEONOS ROUTE IMG append '+u);return true;}catch(e){console.error(e);return false;}}"
+		"function get(u){var r=g._leonosFetchText?g._leonosFetchText(u,'GET','','','application/json'):null;"
+		"console.log('LEONOS ROUTE SYNC fetch '+(r&&r.status)+' '+u);"
+		"try{return JSON.parse(String(r&&r.body||'{}'));}catch(e){return {};}}"
+		"function first(o,d){if(!o||d>7)return null;if(Array.isArray(o)){for(var i=0;i<o.length;i++){var a=first(o[i],d+1);if(a)return a;}return null;}"
+		"if(typeof o==='object'){if(o.universeId)return {t:'u',id:o.universeId};if(o.rootPlaceId)return {t:'p',id:o.rootPlaceId};"
+		"if(o.placeId)return {t:'p',id:o.placeId};if(o.assetId)return {t:'a',id:o.assetId};"
+		"for(var k in o)if(o.hasOwnProperty(k)){var r=first(o[k],d+1);if(r)return r;}}return null;}"
+		"function img(j){var a=j&&j.data;return a&&a.length&&a[0]&&a[0].imageUrl||'';}"
+		"var sorts=get('https://apis.roblox.com/explore-api/v1/get-sorts?sessionId=leonos'),sort='top-trending';"
+		"if(sorts&&sorts.sorts){for(var i=0;i<sorts.sorts.length;i++){var s=sorts.sorts[i];if(s&&s.contentType==='Games'&&s.sortId){sort=s.sortId;break;}}}"
+		"var data=get('https://apis.roblox.com/explore-api/v1/get-sort-content?sessionId=leonos&sortId='+encodeURIComponent(sort));"
+		"var id=first(data,0),url='';console.log('LEONOS ROUTE PROBE id '+(id&&id.t)+':'+(id&&id.id));"
+		"if(id&&id.t==='u')url=img(get('https://thumbnails.roblox.com/v1/games/icons?universeIds='+encodeURIComponent(id.id)+'&size=512x512&format=Png&isCircular=false'));"
+		"if(!url&&id&&id.t==='p')url=img(get('https://thumbnails.roblox.com/v1/places/gameicons?placeIds='+encodeURIComponent(id.id)+'&size=512x512&format=Png&isCircular=false'));"
+		"if(!url&&id&&id.t==='a')url=img(get('https://thumbnails.roblox.com/v1/assets?assetIds='+encodeURIComponent(id.id)+'&size=420x420&format=Png&isCircular=false'));"
+		"console.log('LEONOS ROUTE PROBE imageUrl '+url);appendImg(url);"
+		"}catch(e){console.error(e);}})(globalThis);";
+	size_t fallback_len = sizeof(fallback) - 1u;
+	char *next;
+	if (name == NULL || eval_copy == NULL || *eval_copy == NULL ||
+	    eval_len == NULL ||
+	    strstr(name, "js.rbxcdn.com/") == NULL ||
+	    strstr(name, "ReactLanding.") == NULL) {
+		return false;
+	}
+	next = malloc(fallback_len + 1u);
+	if (next == NULL) {
+		return false;
+	}
+	memcpy(next, fallback, fallback_len);
+	next[fallback_len] = 0;
+	free(*eval_copy);
+	*eval_copy = next;
+	*eval_len = fallback_len;
+#ifdef LEONOS_USER_APP
+	leonos_write("NETSURF QUICKJS ROUTE PROBE early ");
+	leonos_write(name);
+	leonos_write("\r\n");
+#endif
+	return true;
 }
 
 static bool qjs_inject_gamecarousel_probe(const char *name, char **eval_copy,
@@ -6189,8 +6394,9 @@ nserror js_newheap(int timeout, jsheap **heap)
 		return NSERROR_NOMEM;
 	}
 	ret->timeout = timeout;
-	JS_SetMemoryLimit(ret->runtime, 16u * 1024u * 1024u);
-	JS_SetGCThreshold(ret->runtime, 4u * 1024u * 1024u);
+	JS_SetMemoryLimit(ret->runtime, LEONOS_QUICKJS_MEMORY_LIMIT);
+	JS_SetGCThreshold(ret->runtime, LEONOS_QUICKJS_GC_THRESHOLD);
+	JS_SetMaxStackSize(ret->runtime, LEONOS_QUICKJS_STACK_LIMIT);
 	JS_SetInterruptHandler(ret->runtime, qjs_interrupt_handler, ret);
 	*heap = ret;
 #ifdef LEONOS_USER_APP
@@ -6349,6 +6555,9 @@ bool js_exec(jsthread *thread, const uint8_t *txt, size_t txtlen,
 	}
 #endif
 	if (qjs_inject_gamecarousel_probe(name, &eval_copy, &eval_len)) {
+		eval_text = eval_copy;
+	}
+	if (qjs_replace_roblox_react_landing(name, &eval_copy, &eval_len)) {
 		eval_text = eval_copy;
 	}
 	if (qjs_should_skip_blocking_script(name, eval_text, eval_len)) {
