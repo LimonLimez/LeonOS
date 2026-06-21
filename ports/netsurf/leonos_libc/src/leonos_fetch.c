@@ -23,7 +23,7 @@ unsigned int leonos_netsurf_fetch_generation_for_script;
 #endif
 
 #define LEONOS_FETCH_MAX_BYTES (8u * 1024u * 1024u)
-#define LEONOS_FETCH_CHUNK_BYTES 4096u
+#define LEONOS_FETCH_CHUNK_BYTES 8192u
 #define LEONOS_FETCH_STREAM_POLL_BUDGET 1024u
 #define LEONOS_FETCH_STREAM_IDLE_STEP_LIMIT 16u
 #define LEONOS_FETCH_POLL_CONTEXT_BUDGET 12u
@@ -530,13 +530,16 @@ static bool leonos_fetch_url_is_roblox_deferred_style(const char *url)
     if (url == NULL || strstr(url, "css.rbxcdn.com/") == NULL) {
         return false;
     }
+
     if (strstr(url, "FoundationCss.") != NULL ||
         strstr(url, "ReactStyleGuide.") != NULL ||
+        strstr(url, "Builder.") != NULL ||
         strstr(url, "Thumbnails.") != NULL ||
         strstr(url, "SearchLandingPage.") != NULL ||
         strstr(url, "ReactLanding.") != NULL) {
         return false;
     }
+
     return true;
 }
 
