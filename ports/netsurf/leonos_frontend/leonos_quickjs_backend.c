@@ -79,6 +79,10 @@ static JSValue qjs_document_get_elements_by_name(JSContext *ctx,
 						 JSValueConst this_val,
 						 int argc,
 						 JSValueConst *argv);
+static JSValue qjs_native_matches(JSContext *ctx, JSValueConst this_val,
+				  int argc, JSValueConst *argv);
+static JSValue qjs_native_closest(JSContext *ctx, JSValueConst this_val,
+				  int argc, JSValueConst *argv);
 static uint32_t qjs_array_length(JSContext *ctx, JSValueConst array);
 static void qjs_sync_native_subtree_props(JSContext *ctx, JSValueConst obj);
 
@@ -3371,6 +3375,8 @@ static JSValue qjs_new_dom_node_limited(JSContext *ctx, dom_node *node,
 	qjs_install_function(ctx, obj, "setAttribute", qjs_native_set_attribute, 2);
 	qjs_install_function(ctx, obj, "removeAttribute",
 			     qjs_native_remove_attribute, 1);
+	qjs_install_function(ctx, obj, "matches", qjs_native_matches, 1);
+	qjs_install_function(ctx, obj, "closest", qjs_native_closest, 1);
 	qjs_install_function(ctx, obj, "querySelector",
 			     qjs_document_query_selector, 1);
 	qjs_install_function(ctx, obj, "querySelectorAll",
@@ -4294,6 +4300,119 @@ static size_t qjs_selector_find_group_end(const char *text,
 		}
 	}
 	return len;
+}
+
+static bool qjs_dom_element_matches_selector_text(dom_element *element,
+						  const char *selector_text)
+{
+	size_t len;
+	size_t start = 0u;
+
+	if (element == NULL || selector_text == NULL) {
+		return false;
+	}
+	len = strlen(selector_text);
+	while (start < len) {
+		size_t end = qjs_selector_find_group_end(selector_text, start, len);
+		size_t trimmed_start = start;
+		size_t trimmed_end = end;
+		char group[512];
+		size_t group_len;
+		struct qjs_selector_chain chain;
+
+		while (trimmed_start < trimmed_end &&
+		       qjs_ascii_space(selector_text[trimmed_start])) {
+			trimmed_start += 1u;
+		}
+		while (trimmed_end > trimmed_start &&
+		       qjs_ascii_space(selector_text[trimmed_end - 1u])) {
+			trimmed_end -= 1u;
+		}
+		group_len = trimmed_end - trimmed_start;
+		if (group_len != 0u && group_len < sizeof(group)) {
+			memcpy(group, selector_text + trimmed_start, group_len);
+			group[group_len] = 0;
+			if (qjs_parse_selector_chain(group, &chain) &&
+			    qjs_dom_element_matches_chain(element, &chain)) {
+				return true;
+			}
+		}
+		if (end >= len) {
+			break;
+		}
+		start = end + 1u;
+	}
+	return false;
+}
+
+static JSValue qjs_native_matches(JSContext *ctx, JSValueConst this_val,
+				  int argc, JSValueConst *argv)
+{
+	struct qjs_native_node *native = qjs_get_native_node(this_val);
+	const char *selector_text;
+	bool matches = false;
+
+	if (argc < 1 || native == NULL || native->node == NULL ||
+	    qjs_native_node_type(native->node) != DOM_ELEMENT_NODE) {
+		return JS_NewBool(ctx, false);
+	}
+	selector_text = JS_ToCString(ctx, argv[0]);
+	if (selector_text == NULL) {
+		return JS_NewBool(ctx, false);
+	}
+	matches = qjs_dom_element_matches_selector_text(
+		(dom_element *) native->node, selector_text);
+	JS_FreeCString(ctx, selector_text);
+	return JS_NewBool(ctx, matches);
+}
+
+static JSValue qjs_native_closest(JSContext *ctx, JSValueConst this_val,
+				  int argc, JSValueConst *argv)
+{
+	struct qjs_native_node *native = qjs_get_native_node(this_val);
+	const char *selector_text;
+	dom_node *cursor;
+
+	if (argc < 1 || native == NULL || native->node == NULL) {
+		return JS_NULL;
+	}
+	selector_text = JS_ToCString(ctx, argv[0]);
+	if (selector_text == NULL) {
+		return JS_NULL;
+	}
+	cursor = dom_node_ref(native->node);
+	while (cursor != NULL) {
+		dom_node_type type = DOM_NODE_TYPE_COUNT;
+		if (dom_node_get_node_type(cursor, &type) == DOM_NO_ERR &&
+		    type == DOM_ELEMENT_NODE &&
+		    qjs_dom_element_matches_selector_text((dom_element *) cursor,
+							  selector_text)) {
+			bool same = false;
+			(void) dom_node_is_same(cursor, native->node, &same);
+			JS_FreeCString(ctx, selector_text);
+			if (same) {
+				dom_node_unref(cursor);
+				return JS_DupValue(ctx, this_val);
+			}
+			JSValue result = qjs_new_dom_element(ctx,
+				(dom_element *) cursor);
+			dom_node_unref(cursor);
+			return result;
+		}
+		{
+			dom_node *parent = NULL;
+			if (dom_node_get_parent_node(cursor, &parent) !=
+			    DOM_NO_ERR) {
+				dom_node_unref(cursor);
+				cursor = NULL;
+			} else {
+				dom_node_unref(cursor);
+				cursor = parent;
+			}
+		}
+	}
+	JS_FreeCString(ctx, selector_text);
+	return JS_NULL;
 }
 
 static bool qjs_selector_result_list_contains(JSContext *ctx,
@@ -5526,11 +5645,19 @@ static void qjs_maybe_run_selector_selftest(JSContext *ctx)
 		"var desc=root.querySelectorAll('div.missing, span.a em.b');"
 		"var adjacent=root.querySelectorAll('span.a + strong.after');"
 		"var general=root.querySelectorAll('span.a ~ strong.after');"
+		"var negated=root.querySelectorAll('span.a:not(.missing) > em#leaf');"
 		"function isLeaf(n){return n&&n.id==='leaf'&&String(n.className||'').indexOf('b')>=0;}"
 		"function isStrong(n){return n&&String(n.className||'').indexOf('after')>=0;}"
+		"var closestRoot=em.closest&&em.closest('div#selector-root');"
+		"var closestSpan=em.closest&&em.closest('span.a:not(.missing)');"
+		"var matchOk=em.matches&&strong.matches&&em.matches('span.a:not(.missing) > em#leaf')&&"
+		"strong.matches('span.a + strong.after')&&!em.matches('strong.after')&&"
+		"closestRoot&&closestRoot.id==='selector-root'&&closestSpan&&"
+		"String(closestSpan.className||'').indexOf('a')>=0&&!em.closest('strong.after');"
 		"var ok=direct.length===1&&isLeaf(direct[0])&&desc.length===1&&"
 		"isLeaf(desc[0])&&adjacent.length===1&&isStrong(adjacent[0])&&"
-		"general.length===1&&isStrong(general[0]);"
+		"general.length===1&&isStrong(general[0])&&negated.length===1&&"
+		"isLeaf(negated[0])&&matchOk;"
 		"if(root.parentNode&&root.parentNode.removeChild)root.parentNode.removeChild(root);"
 		"console.log('NETSURF QUICKJS SELECTOR SELFTEST '+(ok?'ok':'fail'));"
 		"return ok?'ok':'fail';"
