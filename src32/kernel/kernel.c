@@ -1476,11 +1476,255 @@ static void draw_char(u32 x, u32 y, char ch, u32 color)
     draw_char_scaled(x, y, ch, color, gui_font_scale());
 }
 
+enum {
+    GLYPH_ACCENT_NONE = 0,
+    GLYPH_ACCENT_GRAVE = 1,
+    GLYPH_ACCENT_ACUTE = 2,
+    GLYPH_ACCENT_CIRCUMFLEX = 3,
+    GLYPH_ACCENT_TILDE = 4,
+    GLYPH_ACCENT_DIAERESIS = 5,
+    GLYPH_ACCENT_RING = 6,
+    GLYPH_ACCENT_CEDILLA = 7,
+    GLYPH_ACCENT_DOT = 8
+};
+
+static u32 draw_text_utf8_next(const char *text, u32 *index)
+{
+    u8 c = (u8)text[*index];
+    *index += 1u;
+    if (c < 0x80u) {
+        return c;
+    }
+    if ((c & 0xe0u) == 0xc0u) {
+        u8 c1 = (u8)text[*index];
+        if ((c1 & 0xc0u) == 0x80u) {
+            *index += 1u;
+            return ((u32)(c & 0x1fu) << 6) | (u32)(c1 & 0x3fu);
+        }
+        return '?';
+    }
+    if ((c & 0xf0u) == 0xe0u) {
+        u8 c1 = (u8)text[*index];
+        u8 c2 = c1 != 0u ? (u8)text[*index + 1u] : 0u;
+        if ((c1 & 0xc0u) == 0x80u && (c2 & 0xc0u) == 0x80u) {
+            *index += 2u;
+            return ((u32)(c & 0x0fu) << 12) |
+                   ((u32)(c1 & 0x3fu) << 6) |
+                   (u32)(c2 & 0x3fu);
+        }
+        return '?';
+    }
+    if ((c & 0xf8u) == 0xf0u) {
+        u8 c1 = (u8)text[*index];
+        u8 c2 = c1 != 0u ? (u8)text[*index + 1u] : 0u;
+        u8 c3 = c2 != 0u ? (u8)text[*index + 2u] : 0u;
+        if ((c1 & 0xc0u) == 0x80u &&
+            (c2 & 0xc0u) == 0x80u &&
+            (c3 & 0xc0u) == 0x80u) {
+            *index += 3u;
+            return ((u32)(c & 0x07u) << 18) |
+                   ((u32)(c1 & 0x3fu) << 12) |
+                   ((u32)(c2 & 0x3fu) << 6) |
+                   (u32)(c3 & 0x3fu);
+        }
+    }
+    return '?';
+}
+
+static char draw_text_unicode_base(u32 cp, u8 *accent)
+{
+    *accent = GLYPH_ACCENT_NONE;
+    if (cp < 0x80u) {
+        return (char)cp;
+    }
+    if (cp == 0x00a0u || cp == 0x2007u || cp == 0x202fu) {
+        return ' ';
+    }
+    if (cp == 0x2010u || cp == 0x2011u || cp == 0x2012u ||
+        cp == 0x2013u || cp == 0x2014u || cp == 0x2212u) {
+        return '-';
+    }
+    if (cp == 0x2018u || cp == 0x2019u || cp == 0x201au ||
+        cp == 0x201bu || cp == 0x2032u) {
+        return '\'';
+    }
+    if (cp == 0x201cu || cp == 0x201du || cp == 0x201eu ||
+        cp == 0x201fu || cp == 0x2033u) {
+        return '"';
+    }
+    if (cp == 0x2022u || cp == 0x25cfu || cp == 0x00b7u) {
+        return '*';
+    }
+    if (cp == 0x2026u) {
+        return '.';
+    }
+    if (cp == 0x00a9u) {
+        return 'c';
+    }
+    if (cp == 0x00aeu) {
+        return 'r';
+    }
+    if (cp == 0x2122u) {
+        return 'T';
+    }
+
+    switch (cp) {
+    case 0x00c0u: *accent = GLYPH_ACCENT_GRAVE; return 'A';
+    case 0x00c1u: *accent = GLYPH_ACCENT_ACUTE; return 'A';
+    case 0x00c2u: *accent = GLYPH_ACCENT_CIRCUMFLEX; return 'A';
+    case 0x00c3u: *accent = GLYPH_ACCENT_TILDE; return 'A';
+    case 0x00c4u: *accent = GLYPH_ACCENT_DIAERESIS; return 'A';
+    case 0x00c5u: *accent = GLYPH_ACCENT_RING; return 'A';
+    case 0x00c6u: return 'A';
+    case 0x00c7u: *accent = GLYPH_ACCENT_CEDILLA; return 'C';
+    case 0x00c8u: *accent = GLYPH_ACCENT_GRAVE; return 'E';
+    case 0x00c9u: *accent = GLYPH_ACCENT_ACUTE; return 'E';
+    case 0x00cau: *accent = GLYPH_ACCENT_CIRCUMFLEX; return 'E';
+    case 0x00cbu: *accent = GLYPH_ACCENT_DIAERESIS; return 'E';
+    case 0x00ccu: *accent = GLYPH_ACCENT_GRAVE; return 'I';
+    case 0x00cdu: *accent = GLYPH_ACCENT_ACUTE; return 'I';
+    case 0x00ceu: *accent = GLYPH_ACCENT_CIRCUMFLEX; return 'I';
+    case 0x00cfu: *accent = GLYPH_ACCENT_DIAERESIS; return 'I';
+    case 0x00d0u: return 'D';
+    case 0x00d1u: *accent = GLYPH_ACCENT_TILDE; return 'N';
+    case 0x00d2u: *accent = GLYPH_ACCENT_GRAVE; return 'O';
+    case 0x00d3u: *accent = GLYPH_ACCENT_ACUTE; return 'O';
+    case 0x00d4u: *accent = GLYPH_ACCENT_CIRCUMFLEX; return 'O';
+    case 0x00d5u: *accent = GLYPH_ACCENT_TILDE; return 'O';
+    case 0x00d6u: *accent = GLYPH_ACCENT_DIAERESIS; return 'O';
+    case 0x00d8u: return 'O';
+    case 0x00d9u: *accent = GLYPH_ACCENT_GRAVE; return 'U';
+    case 0x00dau: *accent = GLYPH_ACCENT_ACUTE; return 'U';
+    case 0x00dbu: *accent = GLYPH_ACCENT_CIRCUMFLEX; return 'U';
+    case 0x00dcu: *accent = GLYPH_ACCENT_DIAERESIS; return 'U';
+    case 0x00ddu: *accent = GLYPH_ACCENT_ACUTE; return 'Y';
+    case 0x00deu: return 'P';
+    case 0x00dfu: return 's';
+    case 0x00e0u: *accent = GLYPH_ACCENT_GRAVE; return 'a';
+    case 0x00e1u: *accent = GLYPH_ACCENT_ACUTE; return 'a';
+    case 0x00e2u: *accent = GLYPH_ACCENT_CIRCUMFLEX; return 'a';
+    case 0x00e3u: *accent = GLYPH_ACCENT_TILDE; return 'a';
+    case 0x00e4u: *accent = GLYPH_ACCENT_DIAERESIS; return 'a';
+    case 0x00e5u: *accent = GLYPH_ACCENT_RING; return 'a';
+    case 0x00e6u: return 'a';
+    case 0x00e7u: *accent = GLYPH_ACCENT_CEDILLA; return 'c';
+    case 0x00e8u: *accent = GLYPH_ACCENT_GRAVE; return 'e';
+    case 0x00e9u: *accent = GLYPH_ACCENT_ACUTE; return 'e';
+    case 0x00eau: *accent = GLYPH_ACCENT_CIRCUMFLEX; return 'e';
+    case 0x00ebu: *accent = GLYPH_ACCENT_DIAERESIS; return 'e';
+    case 0x00ecu: *accent = GLYPH_ACCENT_GRAVE; return 'i';
+    case 0x00edu: *accent = GLYPH_ACCENT_ACUTE; return 'i';
+    case 0x00eeu: *accent = GLYPH_ACCENT_CIRCUMFLEX; return 'i';
+    case 0x00efu: *accent = GLYPH_ACCENT_DIAERESIS; return 'i';
+    case 0x00f0u: return 'd';
+    case 0x00f1u: *accent = GLYPH_ACCENT_TILDE; return 'n';
+    case 0x00f2u: *accent = GLYPH_ACCENT_GRAVE; return 'o';
+    case 0x00f3u: *accent = GLYPH_ACCENT_ACUTE; return 'o';
+    case 0x00f4u: *accent = GLYPH_ACCENT_CIRCUMFLEX; return 'o';
+    case 0x00f5u: *accent = GLYPH_ACCENT_TILDE; return 'o';
+    case 0x00f6u: *accent = GLYPH_ACCENT_DIAERESIS; return 'o';
+    case 0x00f8u: return 'o';
+    case 0x00f9u: *accent = GLYPH_ACCENT_GRAVE; return 'u';
+    case 0x00fau: *accent = GLYPH_ACCENT_ACUTE; return 'u';
+    case 0x00fbu: *accent = GLYPH_ACCENT_CIRCUMFLEX; return 'u';
+    case 0x00fcu: *accent = GLYPH_ACCENT_DIAERESIS; return 'u';
+    case 0x00fdu: *accent = GLYPH_ACCENT_ACUTE; return 'y';
+    case 0x00feu: return 'p';
+    case 0x00ffu: *accent = GLYPH_ACCENT_DIAERESIS; return 'y';
+    case 0x0106u: *accent = GLYPH_ACCENT_ACUTE; return 'C';
+    case 0x0107u: *accent = GLYPH_ACCENT_ACUTE; return 'c';
+    case 0x0143u: *accent = GLYPH_ACCENT_ACUTE; return 'N';
+    case 0x0144u: *accent = GLYPH_ACCENT_ACUTE; return 'n';
+    case 0x015au: *accent = GLYPH_ACCENT_ACUTE; return 'S';
+    case 0x015bu: *accent = GLYPH_ACCENT_ACUTE; return 's';
+    case 0x0179u: *accent = GLYPH_ACCENT_ACUTE; return 'Z';
+    case 0x017au: *accent = GLYPH_ACCENT_ACUTE; return 'z';
+    case 0x017bu: *accent = GLYPH_ACCENT_DOT; return 'Z';
+    case 0x017cu: *accent = GLYPH_ACCENT_DOT; return 'z';
+    case 0x017du: *accent = GLYPH_ACCENT_CIRCUMFLEX; return 'Z';
+    case 0x017eu: *accent = GLYPH_ACCENT_CIRCUMFLEX; return 'z';
+    case 0x0141u: return 'L';
+    case 0x0142u: return 'l';
+    default: break;
+    }
+
+    return '?';
+}
+
+static void draw_accent_scaled(u32 x, u32 y, u32 color, u8 scale, u8 accent)
+{
+    u32 cell = 2u * (u32)scale;
+    u32 dot = cell > 1u ? cell : 1u;
+    u32 mid = x + 2u * cell;
+
+    switch (accent) {
+    case GLYPH_ACCENT_GRAVE:
+        fill_rect(x + cell, y, dot, dot, color);
+        fill_rect(x + 2u * cell, y + dot, dot, dot, color);
+        break;
+    case GLYPH_ACCENT_ACUTE:
+        fill_rect(x + 3u * cell, y, dot, dot, color);
+        fill_rect(x + 2u * cell, y + dot, dot, dot, color);
+        break;
+    case GLYPH_ACCENT_CIRCUMFLEX:
+        fill_rect(x + cell, y + dot, dot, dot, color);
+        fill_rect(mid, y, dot, dot, color);
+        fill_rect(x + 3u * cell, y + dot, dot, dot, color);
+        break;
+    case GLYPH_ACCENT_TILDE:
+        fill_rect(x + cell, y, dot, dot, color);
+        fill_rect(x + 2u * cell, y + dot, dot, dot, color);
+        fill_rect(x + 3u * cell, y, dot, dot, color);
+        break;
+    case GLYPH_ACCENT_DIAERESIS:
+        fill_rect(x + cell, y, dot, dot, color);
+        fill_rect(x + 3u * cell, y, dot, dot, color);
+        break;
+    case GLYPH_ACCENT_RING:
+        fill_rect(mid, y, dot, dot, color);
+        fill_rect(x + cell, y + dot, dot, dot, color);
+        fill_rect(x + 3u * cell, y + dot, dot, dot, color);
+        fill_rect(mid, y + 2u * dot, dot, dot, color);
+        break;
+    case GLYPH_ACCENT_CEDILLA:
+        fill_rect(mid, y + 7u * cell, dot, dot, color);
+        fill_rect(x + 3u * cell, y + 8u * cell, dot, dot, color);
+        break;
+    case GLYPH_ACCENT_DOT:
+        fill_rect(mid, y, dot, dot, color);
+        break;
+    default:
+        break;
+    }
+}
+
+static u8 draw_text_utf8_glyph_reported;
+
 static void draw_text(u32 x, u32 y, const char *text, u32 color)
 {
     u32 advance = gui_char_advance();
-    for (u32 index = 0; text[index] != 0; index += 1) {
-        draw_char(x + index * advance, y, text[index], color);
+    u32 index = 0u;
+    u32 glyph = 0u;
+    u8 scale = gui_font_scale();
+
+    while (text[index] != 0) {
+        u32 cp = draw_text_utf8_next(text, &index);
+        u8 accent;
+        char base;
+
+        if ((cp >= 0x0300u && cp <= 0x036fu) ||
+            (cp >= 0xfe00u && cp <= 0xfe0fu)) {
+            continue;
+        }
+
+        base = draw_text_unicode_base(cp, &accent);
+        if (cp >= 0x80u && !draw_text_utf8_glyph_reported) {
+            draw_text_utf8_glyph_reported = 1u;
+            serial_print_line("LeonOS user fb utf8 glyph");
+        }
+        draw_char_scaled(x + glyph * advance, y, base, color, scale);
+        draw_accent_scaled(x + glyph * advance, y, color, scale, accent);
+        glyph += 1u;
     }
 }
 

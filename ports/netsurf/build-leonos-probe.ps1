@@ -3844,12 +3844,49 @@ static void leonos_plot_utf8_to_ascii(
 	dst[out] = 0;
 }
 
+static void leonos_plot_utf8_copy(
+		char *dst, size_t dst_len,
+		const char *text, size_t length)
+{
+	size_t in = 0;
+	size_t out = 0;
+
+	if (dst_len == 0) {
+		return;
+	}
+	while (out + 1u < dst_len && in < length && text[in] != 0) {
+		size_t start = in;
+		unsigned int cp = leonos_plot_utf8_next(text, length, &in);
+		size_t end = in;
+
+		if (cp == '\r' || cp == '\n' || cp == '\t') {
+			dst[out++] = ' ';
+			continue;
+		}
+		if (cp < 0x80u) {
+			dst[out++] = (char) cp;
+			continue;
+		}
+		if (cp == '?') {
+			dst[out++] = '?';
+			continue;
+		}
+		if (end <= start || out + (end - start) >= dst_len) {
+			break;
+		}
+		while (start < end) {
+			dst[out++] = text[start++];
+		}
+	}
+	dst[out] = 0;
+}
+
 static void leonos_plot_text(int x, int y, const char *text, size_t length,
 			     leonos_u32 colour)
 {
 	char capped[192];
 
-	leonos_plot_utf8_to_ascii(capped, sizeof(capped), text, length);
+	leonos_plot_utf8_copy(capped, sizeof(capped), text, length);
 	if (capped[0] == 0) {
 		return;
 	}
@@ -3869,6 +3906,62 @@ static void leonos_plot_text(int x, int y, const char *text, size_t length,
             throw "Could not patch NetSurf LeonOS UTF-8 plot text fallback."
         }
         $PlotText = $PlotText.Replace($OldLeonOsPlotText, $NewLeonOsPlotText)
+        [System.IO.File]::WriteAllText($PlotSource, $PlotText, [System.Text.Encoding]::ASCII)
+    }
+    $PlotText = [System.IO.File]::ReadAllText($PlotSource) -replace "`r`n", "`n"
+    if ($PlotText -match 'leonos_plot_utf8_to_ascii' -and
+        $PlotText -notmatch 'leonos_plot_utf8_copy') {
+        $Utf8CopyHelper = @'
+
+static void leonos_plot_utf8_copy(
+		char *dst, size_t dst_len,
+		const char *text, size_t length)
+{
+	size_t in = 0;
+	size_t out = 0;
+
+	if (dst_len == 0) {
+		return;
+	}
+	while (out + 1u < dst_len && in < length && text[in] != 0) {
+		size_t start = in;
+		unsigned int cp = leonos_plot_utf8_next(text, length, &in);
+		size_t end = in;
+
+		if (cp == '\r' || cp == '\n' || cp == '\t') {
+			dst[out++] = ' ';
+			continue;
+		}
+		if (cp < 0x80u) {
+			dst[out++] = (char) cp;
+			continue;
+		}
+		if (cp == '?') {
+			dst[out++] = '?';
+			continue;
+		}
+		if (end <= start || out + (end - start) >= dst_len) {
+			break;
+		}
+		while (start < end) {
+			dst[out++] = text[start++];
+		}
+	}
+	dst[out] = 0;
+}
+'@
+        $Utf8CopyHelper = $Utf8CopyHelper -replace "`r`n", "`n"
+        $AsciiHelperEnd = @'
+static void leonos_plot_text(int x, int y, const char *text, size_t length,
+'@
+        $AsciiHelperEnd = $AsciiHelperEnd -replace "`r`n", "`n"
+        if (-not $PlotText.Contains($AsciiHelperEnd)) {
+            throw "Could not find NetSurf LeonOS plot text insertion point for UTF-8 copy helper."
+        }
+        $PlotText = $PlotText.Replace($AsciiHelperEnd, $Utf8CopyHelper + "`n" + $AsciiHelperEnd)
+        $PlotText = $PlotText.Replace(
+            "leonos_plot_utf8_to_ascii(capped, sizeof(capped), text, length);",
+            "leonos_plot_utf8_copy(capped, sizeof(capped), text, length);")
         [System.IO.File]::WriteAllText($PlotSource, $PlotText, [System.Text.Encoding]::ASCII)
     }
     $PlotText = [System.IO.File]::ReadAllText($PlotSource) -replace "`r`n", "`n"
