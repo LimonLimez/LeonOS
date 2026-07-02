@@ -23,16 +23,20 @@ process model, a general writable filesystem, or a full browser.
 
 ## Requirements
 
-- Windows PowerShell 5+.
+- Windows PowerShell 5+ or cross-platform PowerShell 7+ (`pwsh`) on Linux/macOS.
 - NASM for building.
 - QEMU for testing.
 
-NASM and QEMU are not vendored in this repo. If they are not installed:
+NASM and QEMU are not vendored in this repo. If they are not installed on
+Windows:
 
 ```powershell
 winget install --id NASM.NASM --exact --accept-source-agreements --accept-package-agreements
 winget install --id SoftwareFreedomConservancy.QEMU --exact --accept-source-agreements --accept-package-agreements
 ```
+
+On Linux, install `nasm`, `qemu-system-x86`, and `clang`/`lld` through the
+system package manager and run the same scripts with `pwsh -File`.
 
 ## Build
 
