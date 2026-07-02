@@ -26,10 +26,13 @@ function Ensure-NsgenbindLeonOsPatches {
         "        fpathl = strlen(options->outdirname) + strlen(fname) + 3;",
         "        fpathl = strlen(options->outdirname) + strlen(fname) + 32;")
     if (-not $UtilsText.Contains("        int rename_res;")) {
-        $FilePattern = [regex] "(        FILE \*filef;\r?\n)"
-        $UtilsText = $FilePattern.Replace(
+        # Declare rename_res inside genb_fclose_tmp (after its last local,
+        # size_t frd;), not after the file's first "FILE *filef;" which
+        # belongs to a different function.
+        $FrdPattern = [regex] "(        size_t frd;\r?\n)"
+        $UtilsText = $FrdPattern.Replace(
             $UtilsText,
-            '${1}        int rename_res;' + "`r`n",
+            '${1}        int rename_res;' + "`n",
             1)
     }
     $RenameBlock = @"
@@ -38,7 +41,6 @@ remove(fpath);
                 if (rename_res != 0) {
                         fprintf(stderr, "Error: unable to rename file %s to %s (%s)\n",
                                 tpath, fpath, strerror(errno));
-                        res = -1;
                 }
 "@
     $RenamePattern = [regex] "remove\(fpath\);\s+rename\(tpath, fpath\);"
@@ -66,7 +68,16 @@ int output_tool_prologue(struct opctx *outc)
 
 Ensure-NsgenbindLeonOsPatches -NsgenbindDir $Nsgenbind
 
-& (Join-Path $PSScriptRoot "bootstrap-winflexbison.ps1") | Write-Host
+$SystemFlex = Get-Command flex -ErrorAction SilentlyContinue
+$SystemBison = Get-Command bison -ErrorAction SilentlyContinue
+if ($SystemFlex -and $SystemBison) {
+    $Flex = $SystemFlex.Source
+    $Bison = $SystemBison.Source
+} else {
+    & (Join-Path $PSScriptRoot "bootstrap-winflexbison.ps1") | Write-Host
+    $Flex = Join-Path $Root ".tools\winflexbison\win_flex.exe"
+    $Bison = Join-Path $Root ".tools\winflexbison\win_bison.exe"
+}
 
 $Build = if ([System.IO.Path]::IsPathRooted($OutputDir)) {
     $OutputDir
@@ -74,9 +85,6 @@ $Build = if ([System.IO.Path]::IsPathRooted($OutputDir)) {
     Join-Path $Root $OutputDir
 }
 New-Item -ItemType Directory -Path $Build -Force | Out-Null
-
-$Flex = Join-Path $Root ".tools\winflexbison\win_flex.exe"
-$Bison = Join-Path $Root ".tools\winflexbison\win_bison.exe"
 $Cc = Join-Path $Root ".tools\llvm-mingw\bin\clang.exe"
 if (-not (Test-Path -LiteralPath $Cc)) {
     $Command = Get-Command clang -ErrorAction SilentlyContinue
