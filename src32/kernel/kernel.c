@@ -324,6 +324,7 @@ static u32 fat32_first_data_sector;
 static u32 fat32_root_cluster;
 static u32 fat32_num_fats;
 static u32 fat32_fat_size;
+static u32 fat32_cluster_count;
 static u8 fat32_data_buf[512];
 static u8 fat32_fat_cache[512];
 static u32 fat32_fat_cache_sector;
@@ -921,15 +922,30 @@ static u32 align_up(u32 value, u32 align)
 
 static u8 event_queue_contains_type(u32 type);
 
+static u32 irq_save_disable(void)
+{
+    u32 flags;
+    __asm__ volatile ("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
+    return flags;
+}
+
+static void irq_restore(u32 flags)
+{
+    __asm__ volatile ("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
+}
+
 static void event_push(u32 type, u32 data0, u32 data1)
 {
+    u32 flags = irq_save_disable();
     u32 next = (event_head + 1u) % EVENT_QUEUE_CAPACITY;
     if (type == EVENT_TIMER && event_queue_contains_type(EVENT_TIMER)) {
+        irq_restore(flags);
         return;
     }
     if (next == event_tail) {
         event_dropped += 1;
         if (type != EVENT_KEYBOARD && type != EVENT_MOUSE_BUTTON) {
+            irq_restore(flags);
             return;
         }
         event_tail = (event_tail + 1u) % EVENT_QUEUE_CAPACITY;
@@ -938,11 +954,14 @@ static void event_push(u32 type, u32 data0, u32 data1)
     event_queue[event_head].data0 = data0;
     event_queue[event_head].data1 = data1;
     event_head = next;
+    irq_restore(flags);
 }
 
 static u8 event_pop(struct KernelEvent *out)
 {
+    u32 flags = irq_save_disable();
     if (event_tail == event_head) {
+        irq_restore(flags);
         return 0;
     }
 
@@ -950,6 +969,7 @@ static u8 event_pop(struct KernelEvent *out)
     out->data0 = event_queue[event_tail].data0;
     out->data1 = event_queue[event_tail].data1;
     event_tail = (event_tail + 1u) % EVENT_QUEUE_CAPACITY;
+    irq_restore(flags);
     return 1;
 }
 
@@ -1796,6 +1816,9 @@ static u16 fat_next(u16 cluster)
     const u8 *fat = (const u8 *) g_boot->fat_address;
     u32 offset = cluster + (cluster / 2u);
     u16 value;
+    if (offset + 1u >= g_boot->fat_sectors * 512u) {
+        return 0x0FF7u; /* treat out-of-range clusters as bad */
+    }
     if ((cluster & 1u) == 0) {
         value = (u16) fat[offset] | (((u16) fat[offset + 1u] & 0x0Fu) << 8);
     } else {
@@ -2086,7 +2109,9 @@ static u8 fat32_mount(void)
     u16 reserved = read16(fat32_data_buf + 0x0Eu);
     u8 num_fats = fat32_data_buf[0x10u];
     u16 root_entries16 = read16(fat32_data_buf + 0x11u);
+    u16 total_sectors16 = read16(fat32_data_buf + 0x13u);
     u16 fat_size16 = read16(fat32_data_buf + 0x16u);
+    u32 total_sectors32 = read32(fat32_data_buf + 0x20u);
     u32 fat_size32 = read32(fat32_data_buf + 0x24u);
     u32 root_cluster = read32(fat32_data_buf + 0x2Cu);
 
@@ -2097,12 +2122,19 @@ static u8 fat32_mount(void)
         return 0;
     }
 
+    u32 total_sectors = total_sectors32 != 0 ? total_sectors32 : (u32) total_sectors16;
+    u32 meta_sectors = (u32) reserved + (u32) num_fats * fat_size32;
+    if (total_sectors <= meta_sectors) {
+        return 0;
+    }
+
     fat32_partition_lba = part_lba;
     fat32_sectors_per_cluster = sectors_per_cluster;
     fat32_num_fats = num_fats;
     fat32_fat_size = fat_size32;
     fat32_first_fat_sector = part_lba + reserved;
-    fat32_first_data_sector = part_lba + reserved + (u32) num_fats * fat_size32;
+    fat32_first_data_sector = part_lba + meta_sectors;
+    fat32_cluster_count = (total_sectors - meta_sectors) / sectors_per_cluster;
     fat32_root_cluster = root_cluster;
     fat32_fat_cache_sector = 0xFFFFFFFFu;
     fat32_present = 1;
@@ -2186,7 +2218,12 @@ static void open_selected_file_fat32(void)
     }
 
     file_buffer_size = copied;
-    file_loaded = 1;
+    file_loaded = (copied != 0u || entry->size == 0u) ? 1u : 0u;
+    if (!file_loaded) {
+        serial_print("LeonOS 32-bit FAT32 file open failed\r\n");
+        dirty = 1;
+        return;
+    }
     copy_name(open_name, entry->name);
     serial_print("LeonOS 32-bit FAT32 file opened ");
     serial_print(open_name);
@@ -2223,8 +2260,14 @@ static u8 fat32_set_fat_entry(u32 cluster, u32 value)
 
 static u32 fat32_alloc_cluster(void)
 {
-    u32 max_clusters = fat32_fat_size * 128u;
-    for (u32 cluster = 3u; cluster < max_clusters; cluster += 1) {
+    /* Valid data clusters are 2 .. fat32_cluster_count + 1; also cap by the
+     * number of entries that actually fit in the FAT table. */
+    u32 max_cluster = fat32_cluster_count + 2u;
+    u32 fat_entries = fat32_fat_size * 128u;
+    if (max_cluster > fat_entries) {
+        max_cluster = fat_entries;
+    }
+    for (u32 cluster = 3u; cluster < max_cluster; cluster += 1) {
         if (fat32_next_cluster(cluster) == 0) {
             return cluster;
         }
@@ -12607,7 +12650,21 @@ static void rtl8139_poll_rx(u32 budget)
         u16 status = rtl8139_rx_read16(offset);
         u16 length = rtl8139_rx_read16((u16) (offset + 2u));
         u32 frame_len = 0u;
-        if ((status & 0x0001u) != 0u && length >= 4u && length <= NET_FRAME_MAX + 4u) {
+        if (length == 0xFFF0u) {
+            /* DMA of the current frame is still in progress. */
+            break;
+        }
+        if (length < 4u || length > NET_FRAME_MAX + 4u) {
+            /* Corrupt descriptor: resync the RX ring instead of advancing
+             * by a garbage length and desyncing every later frame. */
+            outb((u16) (rtl8139_io_base + RTL_REG_CR), 0x08u);
+            outb((u16) (rtl8139_io_base + RTL_REG_CR), 0x0Cu);
+            rtl8139_rx_cur = 0u;
+            outw((u16) (rtl8139_io_base + RTL_REG_CAPR), 0xFFF0u);
+            outw((u16) (rtl8139_io_base + RTL_REG_ISR), 0x0005u);
+            break;
+        }
+        if ((status & 0x0001u) != 0u) {
             frame_len = (u32) length - 4u;
             for (u32 i = 0; i < frame_len; i += 1u) {
                 net_rx_frame[i] = rtl8139_rx_read8((u16) (offset + 4u + i));
@@ -13910,6 +13967,12 @@ static void validate_bootinfo(const struct LeonBootInfo *boot_info)
         boot_info->root_address == 0 ||
         boot_info->data_cache_address == 0) {
         panic("missing FAT12 preload buffers");
+    }
+    if (boot_info->root_entries == 0 ||
+        boot_info->root_entries > LEONOS_ROOT_ENTRIES ||
+        boot_info->fat_sectors == 0 ||
+        boot_info->data_cache_sectors == 0) {
+        panic("invalid FAT12 preload geometry");
     }
 }
 

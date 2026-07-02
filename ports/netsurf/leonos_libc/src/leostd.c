@@ -242,7 +242,6 @@ static const unsigned int leonos_stdin_delay_after[] = {
 static unsigned int leonos_stdin_script_index;
 static unsigned int leonos_stdin_ready_delay;
 static unsigned int leonos_stdin_settle_polls;
-static unsigned int leonos_stdin_fetch_generation;
 extern int leonos_netsurf_fetch_finished_for_script;
 extern int leonos_netsurf_active_fetches_for_script;
 extern unsigned int leonos_netsurf_fetch_generation_for_script;
@@ -701,6 +700,10 @@ void free(void *ptr)
 
 void *calloc(size_t count, size_t size)
 {
+    if (size != 0u && count > ((size_t) -1) / size) {
+        errno = ENOMEM;
+        return NULL;
+    }
     size_t total = count * size;
     void *ptr = malloc(total);
     if (ptr) {
@@ -802,18 +805,27 @@ unsigned long strtoul(const char *nptr, char **endptr, int base)
         base = 10;
     }
 
+    int overflow = 0;
     while (*p != 0) {
         int digit = leonos_digit_value(*p);
         if (digit < 0 || digit >= base) {
             break;
         }
-        value = value * (unsigned long) base + (unsigned long) digit;
+        if (value > (ULONG_MAX - (unsigned long) digit) / (unsigned long) base) {
+            overflow = 1;
+        } else {
+            value = value * (unsigned long) base + (unsigned long) digit;
+        }
         any = 1;
         p += 1;
     }
 
     if (endptr != NULL) {
         *endptr = (char *) (any ? p : nptr);
+    }
+    if (overflow) {
+        errno = ERANGE;
+        return ULONG_MAX;
     }
     return negative ? (unsigned long) (0ul - value) : value;
 }
@@ -846,18 +858,29 @@ unsigned long long strtoull(const char *nptr, char **endptr, int base)
         base = 10;
     }
 
+    int overflow = 0;
     while (*p != 0) {
         int digit = leonos_digit_value(*p);
         if (digit < 0 || digit >= base) {
             break;
         }
-        value = value * (unsigned long long) base + (unsigned long long) digit;
+        if (value > (ULLONG_MAX - (unsigned long long) digit) /
+                (unsigned long long) base) {
+            overflow = 1;
+        } else {
+            value = value * (unsigned long long) base +
+                    (unsigned long long) digit;
+        }
         any = 1;
         p += 1;
     }
 
     if (endptr != NULL) {
         *endptr = (char *) (any ? p : nptr);
+    }
+    if (overflow) {
+        errno = ERANGE;
+        return ULLONG_MAX;
     }
     return negative ? (unsigned long long) (0ull - value) : value;
 }
@@ -2244,14 +2267,40 @@ double difftime(time_t time1, time_t time0)
     return (double) (time1 - time0);
 }
 
+static int leonos_is_leap_year(int year)
+{
+    return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+}
+
 time_t mktime(struct tm *tm)
 {
+    static const int days_before_month[12] = {
+        0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334
+    };
     if (tm == NULL) {
         errno = EINVAL;
         return (time_t) -1;
     }
-    return (time_t) ((((tm->tm_year + 1900) - 1970) * 365 +
-                      tm->tm_yday) * 24 * 60 * 60);
+    int year = tm->tm_year + 1900;
+    int month = tm->tm_mon;
+    if (year < 1970 || month < 0 || month > 11) {
+        errno = EINVAL;
+        return (time_t) -1;
+    }
+    long long days = 0;
+    for (int y = 1970; y < year; y += 1) {
+        days += leonos_is_leap_year(y) ? 366 : 365;
+    }
+    days += days_before_month[month];
+    if (month > 1 && leonos_is_leap_year(year)) {
+        days += 1;
+    }
+    days += tm->tm_mday - 1;
+    long long seconds = days * 86400ll +
+            (long long) tm->tm_hour * 3600ll +
+            (long long) tm->tm_min * 60ll +
+            (long long) tm->tm_sec;
+    return (time_t) seconds;
 }
 
 struct tm *localtime(const time_t *timer)

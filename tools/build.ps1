@@ -13,16 +13,20 @@ $FsRoot = Join-Path $Root "fs"
 New-Item -ItemType Directory -Path $Dist -Force | Out-Null
 
 function Get-LeonOsNasm {
-    $Command = Get-Command "nasm.exe" -ErrorAction SilentlyContinue
-    if ($Command) {
-        return $Command.Source
+    foreach ($Name in @("nasm.exe", "nasm")) {
+        $Command = Get-Command $Name -ErrorAction SilentlyContinue
+        if ($Command) {
+            return $Command.Source
+        }
     }
 
     $Candidates = @(
-        (Join-Path $env:LOCALAPPDATA "bin\NASM\nasm.exe"),
         "C:\Program Files\NASM\nasm.exe",
         "C:\Program Files (x86)\NASM\nasm.exe"
     )
+    if ($env:LOCALAPPDATA) {
+        $Candidates = @(Join-Path $env:LOCALAPPDATA "bin\NASM\nasm.exe") + $Candidates
+    }
 
     foreach ($Candidate in $Candidates) {
         if (Test-Path -LiteralPath $Candidate) {

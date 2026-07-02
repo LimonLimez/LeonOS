@@ -665,6 +665,7 @@ static void qjs_dom_call_event_listener(JSContext *ctx,
 	}
 	if (JS_IsException(result)) {
 		qjs_dom_log_event_exception(ctx);
+		JS_FreeValue(ctx, result);
 		return;
 	}
 	if (!JS_IsUndefined(result) && !JS_IsNull(result) &&

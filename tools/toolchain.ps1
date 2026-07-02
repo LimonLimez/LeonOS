@@ -27,13 +27,17 @@ function Find-LeonOsCommand {
 }
 
 function Get-LeonOsNasmPath {
+    $Candidates = @(
+        "C:\Program Files\NASM\nasm.exe",
+        "C:\Program Files (x86)\NASM\nasm.exe"
+    )
+    if ($env:LOCALAPPDATA) {
+        $Candidates = @(Join-Path $env:LOCALAPPDATA "bin\NASM\nasm.exe") + $Candidates
+    }
+
     $Path = Find-LeonOsCommand `
         -Names @("nasm.exe", "nasm") `
-        -Candidates @(
-            (Join-Path $env:LOCALAPPDATA "bin\NASM\nasm.exe"),
-            "C:\Program Files\NASM\nasm.exe",
-            "C:\Program Files (x86)\NASM\nasm.exe"
-        )
+        -Candidates $Candidates
 
     if (-not $Path) {
         throw @"

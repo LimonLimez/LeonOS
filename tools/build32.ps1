@@ -15,9 +15,17 @@ $Include = Join-Path $Src32 "include"
 $UiSpritesHeader = Join-Path $Include "ui_sprites.h"
 $UiSpriteGen = Join-Path $PSScriptRoot "generate-ui-sprites.ps1"
 
-& $UiSpriteGen -OutHeader $UiSpritesHeader
-if (-not $?) {
-    throw "UI sprite generation failed."
+try {
+    & $UiSpriteGen -OutHeader $UiSpritesHeader
+    if (-not $?) {
+        throw "UI sprite generation failed."
+    }
+} catch {
+    # System.Drawing is Windows-only; fall back to the checked-in header elsewhere.
+    if (-not (Test-Path -LiteralPath $UiSpritesHeader)) {
+        throw "UI sprite generation failed and no checked-in header exists: $($_.Exception.Message)"
+    }
+    Write-Warning "UI sprite regeneration unavailable ($($_.Exception.Message)); using checked-in $UiSpritesHeader."
 }
 if (-not (Test-Path -LiteralPath $UiSpritesHeader)) {
     throw "Missing generated header: $UiSpritesHeader (run tools/generate-ui-sprites.ps1)."
