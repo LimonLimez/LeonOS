@@ -394,8 +394,10 @@ Pressing `U` while the FAT32 disk is mounted makes the kernel:
 - `iret` into the entry point at ring 3 with interrupts enabled.
 
 Pressing `G`, or launching **Run UGFX** from Programs, runs the framebuffer
-syscall probe instead. Pressing `C`, or launching **Run C Demo** from Programs,
-runs the freestanding C user app.
+syscall probe instead. Pressing `Ctrl+C`, or launching **Run C Demo** from
+Programs, runs the freestanding C user app (plain `C` is the shell's
+window-close shortcut; the `UWEB`/`USTREAM` probes likewise use `Ctrl+X` and
+`Ctrl+S`).
 
 When the app calls `SYS_EXIT`, the kernel switches back to the saved kernel
 stack, unmaps the user virtual window, frees the physical pages, and continues.

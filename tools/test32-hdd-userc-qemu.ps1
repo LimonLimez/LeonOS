@@ -36,6 +36,12 @@ $EscapedHddPath = $HddPath -replace '"', '\"'
 function Start-LeonOs32UserCTest {
     param([string] $Name, [string[]] $Commands)
 
+    $SerialLog = Get-LeonOsSerialLogPath $Name
+    if (Test-Path -LiteralPath $SerialLog) {
+        Remove-Item -LiteralPath $SerialLog -Force
+    }
+    $SerialArg = Get-LeonOsQemuSerialFileArg $SerialLog
+
     $Listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
     $Listener.Start()
     $MonitorPort = ([System.Net.IPEndPoint] $Listener.LocalEndpoint).Port
@@ -43,9 +49,8 @@ function Start-LeonOs32UserCTest {
 
     $StartInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $StartInfo.FileName = $script:Qemu
-    $StartInfo.Arguments = "-name $Name -machine pc -cpu qemu32 -m 32M -drive file=`"$script:EscapedImagePath`",format=raw,if=floppy -drive file=`"$script:EscapedHddPath`",format=raw,if=ide,index=0,media=disk -boot a -serial stdio -display none -monitor tcp:127.0.0.1:$MonitorPort,server,nowait -no-reboot"
+    $StartInfo.Arguments = "-name $Name -machine pc -cpu qemu32 -m 32M -drive file=`"$script:EscapedImagePath`",format=raw,if=floppy -drive file=`"$script:EscapedHddPath`",format=raw,if=ide,index=0,media=disk -boot a -serial $SerialArg -display none -monitor tcp:127.0.0.1:$MonitorPort,server,nowait -no-reboot"
     $StartInfo.UseShellExecute = $false
-    $StartInfo.RedirectStandardOutput = $true
     $StartInfo.RedirectStandardError = $true
 
     $Process = [System.Diagnostics.Process]::Start($StartInfo)
@@ -65,20 +70,24 @@ function Start-LeonOs32UserCTest {
             throw "Could not connect to QEMU monitor on port $MonitorPort."
         }
 
-        Start-Sleep -Seconds 8
+        # Wait for the desktop shell instead of sleeping a fixed time so a
+        # slow boot cannot swallow the injected keystrokes.
+        $null = Wait-LeonOsSerialLog $SerialLog "LeonOS shell ready" 60000
         $Stream = $Client.GetStream()
         $Writer = [System.IO.StreamWriter]::new($Stream)
         $Writer.AutoFlush = $true
+        Wait-QemuMonitorPrompt $Stream 8000
 
         foreach ($Command in $Commands) {
             if ($Command.StartsWith("sleep ")) {
                 Start-Sleep -Milliseconds ([int] $Command.Substring(6))
             } else {
                 $Writer.WriteLine($Command)
+                Wait-QemuMonitorPrompt $Stream 3000
             }
         }
 
-        Start-Sleep -Seconds 3
+        $null = Wait-LeonOsSerialLog $SerialLog "LeonOS user app returned to kernel" 15000
         $Writer.WriteLine("quit")
         $Writer.Dispose()
         $Client.Close()
@@ -90,11 +99,12 @@ function Start-LeonOs32UserCTest {
             $Process.WaitForExit()
         }
 
-        $Stdout = $Process.StandardOutput.ReadToEnd()
         $Stderr = $Process.StandardError.ReadToEnd()
+        $Stdout = Read-LeonOsSerialLog $SerialLog
 
         Write-Host "QEMU serial output ($Name):"
         Write-Host $Stdout
+        Write-Host "Serial log: $SerialLog"
         if ($Stderr.Trim().Length -gt 0) {
             Write-Host "QEMU stderr ($Name):"
             Write-Host $Stderr
@@ -112,7 +122,7 @@ function Start-LeonOs32UserCTest {
 }
 
 $Output = Start-LeonOs32UserCTest "LeonOS-32BitHddUserC" @(
-    "sendkey c",
+    "sendkey ctrl-c",
     "sleep 1500"
 )
 

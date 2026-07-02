@@ -13844,6 +13844,23 @@ static void handle_keyboard(void)
         event_push(EVENT_KEYBOARD, 0x40u, 0);
         return;
     }
+    if (keyboard_ctrl_down && !user_overlay_input) {
+        /* Ctrl-modified developer hotkeys for user apps whose plain letters
+         * are taken by shell window-management shortcuts (C close, X
+         * maximize, S start menu). */
+        if (scancode == 0x2Eu) {
+            pending_user_app = USER_APP_UCDEMO;
+            return;
+        }
+        if (scancode == 0x2Du) {
+            pending_user_app = USER_APP_UWEB;
+            return;
+        }
+        if (scancode == 0x1Fu) {
+            pending_user_app = USER_APP_USTREAM;
+            return;
+        }
+    }
     event_push(EVENT_KEYBOARD, scancode, 0);
     if (user_overlay_input) {
         return;
@@ -13870,16 +13887,10 @@ static void handle_keyboard(void)
         pending_user_app = USER_APP_UHELLO;
     } else if (scancode == 0x22u) {
         pending_user_app = USER_APP_UGFX;
-    } else if (scancode == 0x2Eu) {
-        pending_user_app = USER_APP_UCDEMO;
     } else if (scancode == 0x30u) {
         pending_user_app = USER_APP_UBROWSER;
     } else if (scancode == 0x31u) {
         pending_user_app = USER_APP_UNETRUN;
-    } else if (scancode == 0x2Du) {
-        pending_user_app = USER_APP_UWEB;
-    } else if (scancode == 0x1Fu) {
-        pending_user_app = USER_APP_USTREAM;
     } else if (scancode == 0x24u) {
         pending_user_app = USER_APP_UQJS;
     } else if (scancode == 0x01u) {
