@@ -9801,7 +9801,10 @@ static u8 net_browser_form_submit_control(u8 control)
             net_browser_form_append_pair(url, &pos, sizeof(url), &first, (u8) i);
         }
     }
-    if (net_browser_form_is_google_search(form)) {
+    if (net_browser_form_is_google_search(form) &&
+        !net_text_contains_ci(url, "gbv=")) {
+        /* Basic-HTML compatibility pair; skip when the form's own hidden
+         * gbv field already made it into the query string. */
         net_browser_form_append_raw_pair(url, &pos, sizeof(url),
                                          &first, "gbv", "1");
     }
