@@ -48,27 +48,40 @@ try {
         throw "Could not connect to QEMU monitor."
     }
 
-    Start-Sleep -Seconds 8
     $Stream = $Client.GetStream()
     $Writer = [System.IO.StreamWriter]::new($Stream)
     $Writer.AutoFlush = $true
-    $Writer.WriteLine("sendkey j")
 
-    $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    while ([DateTime]::UtcNow -lt $Deadline -and -not $Process.HasExited) {
-        while ($Process.StandardOutput.Peek() -ge 0) {
-            $Line = $Process.StandardOutput.ReadLine()
-            if ($null -eq $Line) {
-                break
-            }
-            [void] $Output.AppendLine($Line)
-        }
-        $TextNow = $Output.ToString()
-        if ($TextNow.Contains("UQJS OK modern JavaScript core") -and
-            $TextNow.Contains("LeonOS user app returned to kernel")) {
+    # Wait for the desktop shell before injecting the hotkey so a slow boot
+    # cannot swallow it.
+    $BootDeadline = [DateTime]::UtcNow.AddSeconds(60)
+    while ([DateTime]::UtcNow -lt $BootDeadline -and -not $Process.HasExited) {
+        $Line = $Process.StandardOutput.ReadLine()
+        if ($null -eq $Line) {
             break
         }
-        Start-Sleep -Milliseconds 100
+        [void] $Output.AppendLine($Line)
+        if ($Line.Contains("LeonOS shell ready")) {
+            break
+        }
+    }
+    Start-Sleep -Seconds 1
+    $Writer.WriteLine("sendkey j")
+
+    $SawOk = $false
+    $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $Deadline -and -not $Process.HasExited) {
+        $Line = $Process.StandardOutput.ReadLine()
+        if ($null -eq $Line) {
+            break
+        }
+        [void] $Output.AppendLine($Line)
+        if ($Line.Contains("UQJS OK modern JavaScript core")) {
+            $SawOk = $true
+        }
+        if ($SawOk -and $Line.Contains("LeonOS user app returned to kernel")) {
+            break
+        }
     }
 
     $Writer.WriteLine("quit")

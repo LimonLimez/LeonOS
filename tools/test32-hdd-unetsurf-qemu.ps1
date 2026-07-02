@@ -45,20 +45,37 @@ try {
     }
     if (-not $Client) { throw "Could not connect to QEMU monitor." }
 
-    Start-Sleep -Seconds 8
     $Stream = $Client.GetStream()
     $Writer = [System.IO.StreamWriter]::new($Stream)
     $Writer.AutoFlush = $true
+
+    # Wait for the desktop shell before injecting the hotkey so a slow boot
+    # cannot swallow it.
+    $BootDeadline = [DateTime]::UtcNow.AddSeconds(60)
+    while ([DateTime]::UtcNow -lt $BootDeadline -and -not $Process.HasExited) {
+        $Line = $Process.StandardOutput.ReadLine()
+        if ($null -eq $Line) {
+            break
+        }
+        [void] $Output.AppendLine($Line)
+        if ($Line.Contains("LeonOS shell ready")) {
+            break
+        }
+    }
+    Start-Sleep -Seconds 1
     $Writer.WriteLine("sendkey n")
-    Start-Sleep -Seconds 25
 
     $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $Deadline -and -not $Process.HasExited) {
-        if ($Process.StandardOutput.Peek() -ge 0) {
-            $Line = $Process.StandardOutput.ReadLine()
-            if ($Line) { [void] $Output.AppendLine($Line) }
-        } else {
-            Start-Sleep -Milliseconds 100
+        $Line = $Process.StandardOutput.ReadLine()
+        if ($null -eq $Line) {
+            break
+        }
+        [void] $Output.AppendLine($Line)
+        # Stop once the last proof line has arrived instead of waiting out
+        # the full deadline.
+        if ($Line.Contains("LeonOS net browser URL open")) {
+            break
         }
     }
 } finally {

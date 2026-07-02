@@ -13,9 +13,12 @@ $Url = "https://bellard.org/quickjs/quickjs-$Version.tar.xz"
 
 New-Item -ItemType Directory -Path $Vendor -Force | Out-Null
 
+$Curl = if (Get-Command "curl.exe" -ErrorAction SilentlyContinue) { "curl.exe" } else { "curl" }
+$Tar = if (Get-Command "tar.exe" -ErrorAction SilentlyContinue) { "tar.exe" } else { "tar" }
+
 if (-not (Test-Path -LiteralPath $Archive)) {
     Write-Host "Downloading QuickJS $Version..."
-    & curl.exe -L $Url -o $Archive
+    & $Curl -L $Url -o $Archive
     if ($LASTEXITCODE -ne 0) {
         throw "curl failed while downloading $Url"
     }
@@ -23,7 +26,7 @@ if (-not (Test-Path -LiteralPath $Archive)) {
 
 if (-not (Test-Path -LiteralPath $Source)) {
     Write-Host "Extracting QuickJS $Version..."
-    & tar.exe -xf $Archive -C $Vendor
+    & $Tar -xf $Archive -C $Vendor
     if ($LASTEXITCODE -ne 0) {
         throw "tar failed while extracting $Archive"
     }

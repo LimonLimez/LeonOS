@@ -75,7 +75,13 @@ $CFlags = @(
     "-DLEONOS_QUICKJS_NO_MALLOC_USABLE_SIZE",
     "-Dalloca=__builtin_alloca",
     "-D_GNU_SOURCE",
-    "-DCONFIG_VERSION=\`"$Version\`"",
+    # Windows PowerShell 5.1 needs backslash-escaped quotes for native
+    # commands; pwsh 7.3+ Standard argument passing forwards them verbatim.
+    $(if ($PSVersionTable.PSVersion.Major -lt 6 -or $IsWindows) {
+        "-DCONFIG_VERSION=\`"$Version\`""
+    } else {
+        "-DCONFIG_VERSION=`"$Version`""
+    }),
     "-I$Include",
     "-I$LibcInclude",
     "-I$QuickJsSource"
