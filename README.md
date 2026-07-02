@@ -38,6 +38,8 @@ winget install --id SoftwareFreedomConservancy.QEMU --exact --accept-source-agre
 On Linux, install `nasm`, `qemu-system-x86`, and `clang`/`lld` through the
 system package manager and run the same scripts with `pwsh -File`.
 
+See [docs/TESTING.md](docs/TESTING.md) for the full test matrix and CI notes.
+
 ## Build
 
 ```powershell

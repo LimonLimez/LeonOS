@@ -51,8 +51,6 @@ try {
     $Writer = [System.IO.StreamWriter]::new($Stream)
     $Writer.AutoFlush = $true
 
-    # Wait for the desktop shell before injecting the hotkey so a slow boot
-    # cannot swallow it.
     $BootDeadline = [DateTime]::UtcNow.AddSeconds(60)
     while ([DateTime]::UtcNow -lt $BootDeadline -and -not $Process.HasExited) {
         $Line = $Process.StandardOutput.ReadLine()
@@ -67,26 +65,20 @@ try {
     Start-Sleep -Seconds 1
     $Writer.WriteLine("sendkey ctrl-s")
 
-    $SawDone = $false
     $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $SawDone = $false
     while ([DateTime]::UtcNow -lt $Deadline -and -not $Process.HasExited) {
-        while ($Process.StandardOutput.Peek() -ge 0) {
-            $Line = $Process.StandardOutput.ReadLine()
-            if ($null -eq $Line) {
-                break
-            }
-            [void] $Output.AppendLine($Line)
-            if ($Line.Contains("USTREAM total ")) {
-                $SawDone = $true
-            }
-            if ($Line.Contains("LeonOS user app returned to kernel") -and $SawDone) {
-                break
-            }
-        }
-        if ($SawDone -and $Output.ToString().Contains("LeonOS user app returned to kernel")) {
+        $Line = $Process.StandardOutput.ReadLine()
+        if ($null -eq $Line) {
             break
         }
-        Start-Sleep -Milliseconds 100
+        [void] $Output.AppendLine($Line)
+        if ($Line.Contains("USTREAM total ")) {
+            $SawDone = $true
+        }
+        if ($SawDone -and $Line.Contains("LeonOS user app returned to kernel")) {
+            break
+        }
     }
 
     $Writer.WriteLine("quit")

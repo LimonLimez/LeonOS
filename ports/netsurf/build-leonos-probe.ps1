@@ -1033,19 +1033,6 @@ function Ensure-NetSurfLeonOsSourcePatches {
         [System.IO.File]::WriteAllText($MimeSniffSource, $Updated, [System.Text.Encoding]::ASCII)
     }
 
-    $MonkeyFetchText = [System.IO.File]::ReadAllText($MonkeyFetchSource) -replace "`r`n", "`n"
-    $Html5BlockDefaults = "article, aside, figcaption, figure, footer, header, main, nav, section { display: block; }"
-    if (-not $MonkeyFetchText.Contains($Html5BlockDefaults)) {
-        $OldDefaultCssRule = "`t`"center { display: block; text-align: center; }\n`""
-        $NewDefaultCssRule = $OldDefaultCssRule + "`n" +
-                "`t`"$Html5BlockDefaults\n`""
-        if (-not $MonkeyFetchText.Contains($OldDefaultCssRule)) {
-            throw "Could not patch LeonOS embedded NetSurf default CSS."
-        }
-        $MonkeyFetchText = $MonkeyFetchText.Replace($OldDefaultCssRule, $NewDefaultCssRule)
-        [System.IO.File]::WriteAllText($MonkeyFetchSource, $MonkeyFetchText, [System.Text.Encoding]::ASCII)
-    }
-
     $BoxConstructText = [System.IO.File]::ReadAllText($BoxConstructSource) -replace "`r`n", "`n"
     if ($BoxConstructText -match 'leonos_dom_text_has_hidden_ancestor') {
         $OldHiddenAncestorRegex = '(?s)#ifdef LEONOS_USER_APP\s*static bool leonos_dom_name_equals_ascii\(dom_string \*name, const char \*ascii\).*?static bool leonos_dom_text_has_hidden_ancestor\(dom_node \*n\).*?#endif\s*\n\n'
@@ -1401,11 +1388,15 @@ static bool leonos_dom_text_looks_nonrendered_source(dom_node *n,
     $CssText = [System.IO.File]::ReadAllText($CssSource) -replace "`r`n", "`n"
     if ($CssText -notmatch 'leonos_css_in_prefers_dark_media') {
         if ($CssText -notmatch '#include <stdlib.h>') {
-            $OldCssInclude = '#include <stdio.h>'
-            $NewCssInclude = @'
-#include <stdio.h>
+            $OldCssInclude = if ($CssText.Contains('#include <stdio.h>')) {
+                '#include <stdio.h>'
+            } else {
+                '#include <string.h>'
+            }
+            $NewCssInclude = @"
+$OldCssInclude
 #include <stdlib.h>
-'@
+"@
             $NewCssInclude = $NewCssInclude -replace "`r`n", "`n"
             if (-not $CssText.Contains($OldCssInclude)) {
                 throw "Could not patch NetSurf CSS stdlib include."

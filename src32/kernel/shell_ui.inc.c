@@ -2502,11 +2502,11 @@ static void shell_draw_net_client(const struct ShellWin *win)
     bx += btn + gap;
     shell_draw_browser_button(bx, by, btn, '>', net_browser_can_forward(), 0u);
     bx += btn + gap;
-    shell_draw_browser_button(bx, by, btn, 'R', 1u, 0u);
+    shell_draw_browser_button(bx, by, btn, 'R', !net_browser_is_loading(), 0u);
     bx += btn + gap;
     shell_draw_browser_button(bx, by, btn, 'X', net_browser_is_loading(), 0u);
     bx += btn + gap;
-    shell_draw_browser_button(bx, by, btn, 'H', 1u, 0u);
+    shell_draw_browser_button(bx, by, btn, 'H', !net_browser_at_home(), 0u);
     bx += btn + gap * 2u;
 
     u32 info_x = x + w - sx(10u) - btn;

@@ -319,6 +319,9 @@ static u8 net_browser_render_add_image_block(u8 image_index)
 static u8 net_browser_first_same_host_resource_slot(void)
 {
     for (u32 r = 0u; r < net_browser_resource_count; r += 1u) {
+        if (net_browser_resource_done[r]) {
+            continue;
+        }
         if (net_browser_same_host_path(net_browser_resource_url[r]) != 0) {
             return (u8) r;
         }
@@ -332,14 +335,15 @@ static void net_browser_image_prepare_resource_fetch(void)
     net_browser_resource_body_overflow = 0u;
     net_browser_fetch_image_index = 0xFFu;
     u8 slot = net_browser_first_same_host_resource_slot();
-    if (slot != 0xFFu) {
+    net_browser_resource_active_slot = slot;
+    if (slot != 0xFFu && net_browser_resource_type[slot] == 'I') {
         net_browser_fetch_image_index = net_browser_resource_image[slot];
     }
 }
 
 static void net_browser_image_note_resource_body(const u8 *data, u32 len)
 {
-    if (net_browser_fetch_image_index == 0xFFu || len == 0u) {
+    if (net_browser_resource_active_slot == 0xFFu || len == 0u) {
         return;
     }
     if (net_browser_resource_body_len + len > NET_BROWSER_IMAGE_RAW_MAX) {

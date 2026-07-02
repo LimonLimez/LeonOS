@@ -14,11 +14,26 @@ $VendorPath = if ([System.IO.Path]::IsPathRooted($VendorDir)) {
 }
 $Git = Get-Command git -ErrorAction SilentlyContinue
 if (-not $Git) {
-    $Fallback = "C:\Program Files\Git\cmd\git.exe"
-    if (Test-Path -LiteralPath $Fallback) {
-        $GitPath = $Fallback
-    } else {
-        throw "git was not found. Install Git for Windows or add git.exe to PATH."
+    $Fallbacks = @(
+        "C:\Program Files\Git\cmd\git.exe",
+        "C:\Program Files (x86)\Git\cmd\git.exe"
+    )
+    $GitPath = $null
+    foreach ($Fallback in $Fallbacks) {
+        if (Test-Path -LiteralPath $Fallback) {
+            $GitPath = $Fallback
+            break
+        }
+    }
+    if (-not $GitPath) {
+        throw @"
+git was not found on PATH.
+
+Install git, then retry:
+  Windows: winget install --id Git.Git
+  Linux:   sudo apt install git
+  macOS:   brew install git
+"@
     }
 } else {
     $GitPath = $Git.Source

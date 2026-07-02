@@ -4131,6 +4131,8 @@ static u8 net_browser_resource_fetch_done;
 static u8 net_browser_resource_fetch_body_seen;
 static u16 net_browser_resource_fetch_bytes;
 static u32 net_browser_resource_fetch_start_tick;
+static u8 net_browser_resource_active_slot;
+static u8 net_browser_resource_done[NET_BROWSER_RESOURCE_MAX];
 static char net_browser_resource_fetch_status[4] = "---";
 static char net_browser_resource_fetch_phase[5] = "IDLE";
 static u16 net_browser_navigation_count;
@@ -4210,6 +4212,8 @@ static char net_browser_current_control_name[NET_BROWSER_CONTROL_NAME_MAX];
 static char net_browser_current_control_actual[NET_BROWSER_CONTROL_VALUE_MAX];
 static char net_browser_current_form_action[NET_BROWSER_RESOURCE_URL_MAX];
 static char net_browser_current_form_method[8];
+static char net_browser_current_link_href[NET_BROWSER_RESOURCE_URL_MAX];
+static char net_browser_current_link_rel[48];
 static u8 net_browser_css_in_style;
 static u8 net_browser_css_summary_added;
 static u8 net_browser_css_token_len;
@@ -4709,6 +4713,9 @@ static const char *net_browser_first_same_host_resource_path(void);
 static u8 net_browser_first_same_host_resource_slot(void);
 static void net_browser_image_prepare_resource_fetch(void);
 static void net_browser_image_decode_current_resource(void);
+static void net_browser_image_reset_resource_body(void);
+static void net_browser_css_feed(u8 ch);
+static void net_browser_css_finish_token(void);
 static void net_browser_image_finalize_direct_document(void);
 
 static void net_browser_set_resource_phase(const char *phase)
@@ -4824,6 +4831,9 @@ static void __attribute__((unused)) net_send_http_resource_get(void)
     if (rslot != 0xFFu && net_browser_resource_type[rslot] == 'I') {
         len = net_append_capped(request, len, sizeof(request),
             "image/png,image/jpeg,*/*");
+    } else if (rslot != 0xFFu && net_browser_resource_type[rslot] == 'C') {
+        len = net_append_capped(request, len, sizeof(request),
+            "text/css,*/*");
     } else {
         len = net_append_capped(request, len, sizeof(request), "text/html");
     }
@@ -5145,6 +5155,9 @@ static const char *net_browser_first_same_host_resource_path(void)
         return active;
     }
     for (u32 r = 0u; r < net_browser_resource_count; r += 1u) {
+        if (net_browser_resource_done[r]) {
+            continue;
+        }
         const char *path = net_browser_same_host_path(net_browser_resource_url[r]);
         if (path != 0) {
             return path;
@@ -5191,7 +5204,8 @@ static void net_browser_finish_resource_fetch(void)
         net_browser_resource_fetch_done) {
         return;
     }
-    net_browser_resource_fetch_done = 1u;
+    u8 slot = net_browser_resource_active_slot;
+    char rtype = (slot != 0xFFu) ? net_browser_resource_type[slot] : 0;
     if (net_browser_resource_fetch_status[0] == '-') {
         net_browser_resource_fetch_status[0] = 'E';
         net_browser_resource_fetch_status[1] = 'O';
@@ -5201,18 +5215,42 @@ static void net_browser_finish_resource_fetch(void)
         serial_print(net_browser_resource_fetch_status);
         serial_print("\r\n");
     }
-    if (net_browser_resource_fetch_status[0] != 'T') {
-        net_browser_set_resource_phase("DONE");
-    }
     if (net_browser_resource_fetch_status[0] == '2') {
-        net_browser_image_decode_current_resource();
+        if (rtype == 'I') {
+            net_browser_image_decode_current_resource();
+        } else if (rtype == 'C') {
+            for (u32 i = 0u; i < net_browser_resource_body_len; i += 1u) {
+                net_browser_css_feed(net_browser_resource_body[i]);
+            }
+            net_browser_css_finish_token();
+            serial_print("LeonOS net browser CSS external parsed bytes ");
+            serial_print_dec(net_browser_resource_body_len);
+            serial_print(" stored ");
+            serial_print_dec(net_browser_css_stored_rule_count);
+            serial_print("\r\n");
+            dirty = 1u;
+        }
     }
     serial_print(msg_net_browser_resource_done_prefix);
     serial_print(net_browser_resource_fetch_status);
     serial_print(" bytes ");
     serial_print_dec(net_browser_resource_fetch_bytes);
     serial_print("\r\n");
+    if (slot != 0xFFu) {
+        net_browser_resource_done[slot] = 1u;
+    }
+    net_browser_resource_fetch_started = 0u;
+    net_browser_resource_active_slot = 0xFFu;
+    net_browser_image_reset_resource_body();
     net_set_last("RESOURCE FETCH DONE");
+    if (net_browser_first_same_host_resource_path() != 0) {
+        net_browser_resource_fetch_done = 0u;
+        net_browser_resource_fetch_pending = 1u;
+        net_browser_set_resource_phase("PEND");
+    } else {
+        net_browser_resource_fetch_done = 1u;
+        net_browser_set_resource_phase("DONE");
+    }
 }
 
 static void net_browser_timeout_resource_fetch(void)
@@ -6113,9 +6151,15 @@ static void net_browser_text_reset(void)
     net_browser_current_control_actual[0] = 0;
     net_browser_current_form_action[0] = 0;
     net_browser_current_form_method[0] = 0;
+    net_browser_current_link_href[0] = 0;
+    net_browser_current_link_rel[0] = 0;
     net_browser_last_form_submit_url[0] = 0;
     net_browser_resource_total = 0u;
     net_browser_resource_count = 0u;
+    net_browser_resource_active_slot = 0xFFu;
+    for (u32 r = 0u; r < NET_BROWSER_RESOURCE_MAX; r += 1u) {
+        net_browser_resource_done[r] = 0u;
+    }
     net_browser_resource_fetch_pending = 0u;
     net_browser_resource_fetch_started = 0u;
     net_browser_resource_fetch_done = 0u;
@@ -8822,6 +8866,13 @@ static u8 net_browser_is_loading(void)
            (net_browser_resource_fetch_started && !net_browser_resource_fetch_done);
 }
 
+static u8 net_browser_at_home(void)
+{
+    return net_text_is(net_browser_current_url, net_browser_default_url) ||
+           net_text_starts_with_ci(net_browser_current_url,
+                                   "https://www.google.com/?igu=1");
+}
+
 static void net_browser_history_save_scroll(void)
 {
     if (net_browser_history_count != 0u &&
@@ -10154,8 +10205,13 @@ static void net_browser_attr_commit(void)
         }
         if (net_tag_is("a")) {
             net_browser_store_current_link_target();
+            net_browser_queue_resource('H');
+        } else if (net_tag_is("link")) {
+            net_copy_attr_value(net_browser_current_link_href,
+                                sizeof(net_browser_current_link_href));
+        } else {
+            net_browser_queue_resource('H');
         }
-        net_browser_queue_resource('H');
     } else if (net_text_is(net_browser_html_attr_name, "src")) {
         net_browser_src_count += 1u;
         if (net_browser_first_src[0] == 0) {
@@ -10209,6 +10265,10 @@ static void net_browser_attr_commit(void)
     } else if (net_text_is(net_browser_html_attr_name, "rel")) {
         if (net_browser_first_rel[0] == 0) {
             net_copy_attr_value(net_browser_first_rel, sizeof(net_browser_first_rel));
+        }
+        if (net_tag_is("link")) {
+            net_copy_attr_value(net_browser_current_link_rel,
+                                sizeof(net_browser_current_link_rel));
         }
     } else if (net_text_is(net_browser_html_attr_name, "class")) {
         net_copy_attr_value(net_browser_current_class,
@@ -10473,6 +10533,14 @@ static void net_browser_finish_tag(void)
     }
     net_browser_attr_commit();
     net_browser_count_tag();
+    if (net_tag_is("link") && net_browser_current_link_href[0] != 0 &&
+        net_text_contains_ci(net_browser_current_link_rel, "stylesheet")) {
+        net_browser_queue_resource_value('C', net_browser_current_link_href);
+    }
+    if (net_tag_is("link")) {
+        net_browser_current_link_href[0] = 0;
+        net_browser_current_link_rel[0] = 0;
+    }
     if (net_browser_html_tag[0] == '/') {
         if (net_tag_is("/form")) {
             net_browser_form_close_current();
@@ -10871,6 +10939,8 @@ static void net_browser_html_feed(const u8 *html, u32 len)
             net_browser_current_control_actual[0] = 0;
             net_browser_current_form_action[0] = 0;
             net_browser_current_form_method[0] = 0;
+            net_browser_current_link_href[0] = 0;
+            net_browser_current_link_rel[0] = 0;
             net_browser_attr_reset_current();
             continue;
         }
