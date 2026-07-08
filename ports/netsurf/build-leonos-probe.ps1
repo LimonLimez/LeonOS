@@ -4516,6 +4516,50 @@ void monkey_window_handle_command(int argc, char **argv);
         $NewInclude = $NewInclude -replace "`r`n", "`n"
         $BrowserText = $BrowserText.Replace($OldInclude, $NewInclude.TrimEnd())
     }
+    if ($BrowserText -match '#include "leonos_user.h"' -and
+        $BrowserText -notmatch 'extern int leonos_netsurf_mark_input_ready') {
+        $OldLeonOsViewBlock = @'
+#ifndef LEONOS_NETSURF_VIEW_Y
+#define LEONOS_NETSURF_VIEW_Y 112u
+#endif
+'@
+        $OldLeonOsViewBlock = $OldLeonOsViewBlock -replace "`r`n", "`n"
+        $NewLeonOsViewBlock = @'
+#ifndef LEONOS_NETSURF_VIEW_Y
+#define LEONOS_NETSURF_VIEW_Y 112u
+#endif
+extern int leonos_netsurf_mark_input_ready(void) __attribute__((weak));
+'@
+        $NewLeonOsViewBlock = $NewLeonOsViewBlock -replace "`r`n", "`n"
+        if (-not $BrowserText.Contains($OldLeonOsViewBlock)) {
+            throw "Could not patch NetSurf monkey browser input-ready extern."
+        }
+        $BrowserText = $BrowserText.Replace($OldLeonOsViewBlock, $NewLeonOsViewBlock.TrimEnd())
+    }
+    if ($BrowserText -match 'RING_INSERT\(gw_ring, ret\);' -and
+        $BrowserText -notmatch '\(void\)leonos_netsurf_mark_input_ready') {
+        $OldWindowInsert = @'
+	RING_INSERT(gw_ring, ret);
+
+	return ret;
+'@
+        $OldWindowInsert = $OldWindowInsert -replace "`r`n", "`n"
+        $NewWindowInsert = @'
+	RING_INSERT(gw_ring, ret);
+#ifdef WITH_LEONOS_FETCHER
+	if (leonos_netsurf_mark_input_ready != NULL) {
+		(void)leonos_netsurf_mark_input_ready();
+	}
+#endif
+
+	return ret;
+'@
+        $NewWindowInsert = $NewWindowInsert -replace "`r`n", "`n"
+        if (-not $BrowserText.Contains($OldWindowInsert)) {
+            throw "Could not patch NetSurf monkey browser input-ready signal."
+        }
+        $BrowserText = $BrowserText.Replace($OldWindowInsert, $NewWindowInsert.TrimEnd())
+    }
     if ($BrowserText -notmatch 'monkey_window_request_redraw') {
         $OldForward = @'
 static void
@@ -4738,7 +4782,7 @@ monkey_window_handle_track(int argc, char **argv)
 	int x;
 	int y;
 
-	if (argc != 8) {
+	if (argc != 7) {
 		moutf(MOUT_ERROR, "WINDOW TRACK ARGS BAD");
 		return;
 	}
@@ -5044,12 +5088,15 @@ leonos_window_first(void)
 }
 
 static int
-leonos_window_translate_point(unsigned int data0, unsigned int data1,
-		int *x, int *y)
+leonos_window_translate_point(struct gui_window *gw, unsigned int data0,
+		unsigned int data1, int *x, int *y)
 {
 	int lx = (int)data0 - (int)LEONOS_NETSURF_VIEW_X;
 	int ly = (int)(data1 & 0xffffu) - (int)LEONOS_NETSURF_VIEW_Y;
 	if (lx < 0 || ly < 0) {
+		return 0;
+	}
+	if (gw == NULL || lx >= gw->width || ly >= gw->height) {
 		return 0;
 	}
 	*x = lx;
@@ -5075,7 +5122,7 @@ monkey_window_process_leonos_event(unsigned int type,
 	}
 
 	if (type == LEONOS_EVENT_MOUSE) {
-		if (!leonos_window_translate_point(data0, data1, &x, &y)) {
+		if (!leonos_window_translate_point(gw, data0, data1, &x, &y)) {
 			return;
 		}
 		browser_window_mouse_track(gw->bw, BROWSER_MOUSE_HOVER, x, y);
@@ -5084,7 +5131,7 @@ monkey_window_process_leonos_event(unsigned int type,
 	} else if (type == LEONOS_EVENT_MOUSE_BUTTON) {
 		unsigned int buttons = (data1 >> 16) & 0xffu;
 		unsigned int prev = (data1 >> 24) & 0xffu;
-		if (!leonos_window_translate_point(data0, data1, &x, &y)) {
+		if (!leonos_window_translate_point(gw, data0, data1, &x, &y)) {
 			return;
 		}
 		if ((buttons & 1u) != 0u && (prev & 1u) == 0u) {
@@ -6066,7 +6113,8 @@ function Invoke-LeonOsCompile {
     $Args += "-D_ALIGNED=__attribute__((aligned))"
     $Args += "-DSTMTEXPR=1"
     foreach ($Define in $Defines) {
-        $Args += "-D$Define"
+        $EscapedDefine = $Define.Replace('"', '\"')
+        $Args += "-D$EscapedDefine"
     }
     foreach ($Include in $Includes) {
         $Args += @("-I", $Include)
@@ -6110,7 +6158,7 @@ if ($Libraries -contains "netsurf-monkey") {
 $LibcOut = Join-Path $Out "leonos_libc"
 New-Item -ItemType Directory -Path $LibcOut -Force | Out-Null
 Invoke-LeonOsCompile -Source $LibcSrc -Object (Join-Path $LibcOut "leostd.o") `
-    -Includes @($Out)
+    -Includes @($Src32Include, $Out) -Defines @("LEONOS_USER_APP")
 [void] $Objects.Add((Join-Path $LibcOut "leostd.o"))
 $SetjmpObj = Join-Path $LibcOut "setjmp-i386.o"
 & $Nasm "-f" "elf32" $LibcSetjmpSrc "-o" $SetjmpObj

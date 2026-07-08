@@ -63,7 +63,7 @@ $ExpectedHost = ([System.Uri] $ExpectedUrl).Host
 $ExpectedIsImage = $ExpectedUrl -match '\.(png|jpe?g)(\?|#|$)'
 
 & (Join-Path $PSScriptRoot "build32-image.ps1") -Resolution $Resolution | Write-Host
-& (Join-Path $PSScriptRoot "build32-hdd.ps1") | Write-Host
+& (Join-Path $PSScriptRoot "build32-hdd.ps1") -ExcludeNetSurf | Write-Host
 
 $Qemu = Get-LeonOsQemu
 $ImagePath = (Get-LeonOsImagePath "dist32\leonos32.img") -replace '"', '\"'

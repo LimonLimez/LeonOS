@@ -1,5 +1,6 @@
 param(
-    [string] $OutDir = "dist32"
+    [string] $OutDir = "dist32",
+    [switch] $ExcludeNetSurf
 )
 
 Set-StrictMode -Version Latest
@@ -626,7 +627,7 @@ if ($UserStreamBytes.Length -gt 1048576) {
 Add-FileToImage "USTREAM.LEO" $UserStreamBytes 0x20
 
 $NetSurfLeoPath = Join-Path $Dist "netsurf-probe\NETSURF.LEO"
-if (Test-Path -LiteralPath $NetSurfLeoPath) {
+if (-not $ExcludeNetSurf -and (Test-Path -LiteralPath $NetSurfLeoPath)) {
     $NetSurfLeoBytes = [System.IO.File]::ReadAllBytes($NetSurfLeoPath)
     if ($NetSurfLeoBytes.Length -lt 32 -or
         $NetSurfLeoBytes[0] -ne 0x4C -or $NetSurfLeoBytes[1] -ne 0x45 -or

@@ -253,6 +253,8 @@ extern int leonos_netsurf_content_ready_for_script;
 #define LEONOS_EVENT_MOUSE_BUTTON 4u
 #define LEONOS_NETSURF_VIEW_X 48u
 #define LEONOS_NETSURF_VIEW_Y 112u
+#define LEONOS_NETSURF_VIEW_WIDTH 800u
+#define LEONOS_NETSURF_VIEW_HEIGHT 600u
 
 static char leonos_pending_stdin_line[768];
 static int leonos_pending_stdin_ready;
@@ -262,6 +264,21 @@ static int leonos_url_editing;
 static int leonos_url_edit_capture;
 static unsigned int leonos_last_redraw_generation;
 static unsigned int leonos_interactive_settle_polls;
+static int leonos_netsurf_input_ready;
+
+static int leonos_netsurf_content_point(unsigned int x, unsigned int y)
+{
+    return x >= LEONOS_NETSURF_VIEW_X &&
+           y >= LEONOS_NETSURF_VIEW_Y &&
+           x < LEONOS_NETSURF_VIEW_X + LEONOS_NETSURF_VIEW_WIDTH &&
+           y < LEONOS_NETSURF_VIEW_Y + LEONOS_NETSURF_VIEW_HEIGHT;
+}
+
+int leonos_netsurf_mark_input_ready(void)
+{
+    leonos_netsurf_input_ready = 1;
+    return 1;
+}
 
 static void leonos_queue_stdin_line(const char *fmt, ...)
 {
@@ -464,6 +481,10 @@ static int leonos_try_mouse_event(const struct leonos_event *event)
     unsigned int x = event->data0;
     unsigned int y = event->data1;
 
+    if (!leonos_netsurf_input_ready) {
+        return 0;
+    }
+
     if (event->type == LEONOS_EVENT_MOUSE_BUTTON) {
         unsigned int packed = event->data1;
         unsigned int buttons = (packed >> 16) & 0xffu;
@@ -475,18 +496,19 @@ static int leonos_try_mouse_event(const struct leonos_event *event)
                 leonos_focus_url_edit();
                 return 0;
             }
-            if (x >= LEONOS_NETSURF_VIEW_X && y >= LEONOS_NETSURF_VIEW_Y) {
+            if (leonos_netsurf_content_point(x, y)) {
                 leonos_queue_stdin_line(
-                    "WINDOW CLICK 0 X %u Y %u BUTTON LEFT KIND SINGLE\n",
+                    "WINDOW CLICK WIN 0 X %u Y %u BUTTON LEFT KIND SINGLE\n",
                     x - LEONOS_NETSURF_VIEW_X,
                     y - LEONOS_NETSURF_VIEW_Y);
+                leonos_write_stdout("LEONOS_EVENT CLICK WIN 0\r\n");
                 return 1;
             }
         }
         if ((buttons & 2u) != 0u && (previous & 2u) == 0u &&
-            x >= LEONOS_NETSURF_VIEW_X && y >= LEONOS_NETSURF_VIEW_Y) {
+            leonos_netsurf_content_point(x, y)) {
             leonos_queue_stdin_line(
-                "WINDOW CLICK 0 X %u Y %u BUTTON RIGHT KIND SINGLE\n",
+                "WINDOW CLICK WIN 0 X %u Y %u BUTTON RIGHT KIND SINGLE\n",
                 x - LEONOS_NETSURF_VIEW_X,
                 y - LEONOS_NETSURF_VIEW_Y);
             return 1;
@@ -494,37 +516,56 @@ static int leonos_try_mouse_event(const struct leonos_event *event)
         return 0;
     }
 
-    if (x >= LEONOS_NETSURF_VIEW_X && y >= LEONOS_NETSURF_VIEW_Y) {
+    if (leonos_netsurf_content_point(x, y)) {
         leonos_queue_stdin_line("WINDOW TRACK 0 X %u Y %u\n",
                                 x - LEONOS_NETSURF_VIEW_X,
                                 y - LEONOS_NETSURF_VIEW_Y);
-        leonos_write_stdout("LEONOS_EVENT CLICK WIN 0\r\n");
         return 1;
     }
     return 0;
 }
 
-static void leonos_prepare_interactive_stdin(void)
+int leonos_netsurf_pump_events(void)
 {
+#if LEONOS_NETSURF_INTERACTIVE
     struct leonos_event event;
+    struct leonos_event last_mouse;
+    int have_mouse = 0;
 
     if (leonos_pending_stdin_ready) {
-        return;
+        return 1;
     }
 
-    for (unsigned int i = 0u; i < 8u; i += 1u) {
+    for (unsigned int i = 0u; i < 64u; i += 1u) {
         if (!leonos_event_poll(&event)) {
             break;
         }
         if (event.type == LEONOS_EVENT_KEYBOARD &&
             leonos_try_keyboard_event(event.data0)) {
-            return;
+            return 1;
         }
-        if ((event.type == LEONOS_EVENT_MOUSE ||
-             event.type == LEONOS_EVENT_MOUSE_BUTTON) &&
-            leonos_try_mouse_event(&event)) {
-            return;
+        if (event.type == LEONOS_EVENT_MOUSE_BUTTON) {
+            if (leonos_try_mouse_event(&event)) {
+                return 1;
+            }
+        } else if (event.type == LEONOS_EVENT_MOUSE) {
+            last_mouse = event;
+            have_mouse = 1;
         }
+    }
+    if (have_mouse && leonos_try_mouse_event(&last_mouse)) {
+        return 1;
+    }
+    return leonos_pending_stdin_ready;
+#else
+    return 0;
+#endif
+}
+
+static void leonos_prepare_interactive_stdin(void)
+{
+    if (leonos_netsurf_pump_events()) {
+        return;
     }
 
     if (leonos_netsurf_fetch_generation_for_script !=
@@ -548,20 +589,7 @@ static void leonos_prepare_interactive_stdin(void)
         return;
     }
 
-    for (unsigned int i = 0u; i < 8u; i += 1u) {
-        if (!leonos_event_poll(&event)) {
-            break;
-        }
-        if (event.type == LEONOS_EVENT_KEYBOARD &&
-            leonos_try_keyboard_event(event.data0)) {
-            return;
-        }
-        if ((event.type == LEONOS_EVENT_MOUSE ||
-             event.type == LEONOS_EVENT_MOUSE_BUTTON) &&
-            leonos_try_mouse_event(&event)) {
-            return;
-        }
-    }
+    (void) leonos_netsurf_pump_events();
 }
 #endif
 
@@ -2510,6 +2538,7 @@ int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
     (void) timeout;
 #ifdef LEONOS_USER_APP
     leonos_yield();
+    (void) leonos_netsurf_pump_events();
     if (writefds != NULL) {
         FD_ZERO(writefds);
     }

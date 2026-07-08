@@ -113,7 +113,6 @@ try {
     $null = Wait-LeonOsSerialLog $SerialLog "LeonOS cooperative scheduler OK" 90000
     Send-MonitorCommand $Writer $Stream "sendkey f11"
     $null = Wait-LeonOsSerialLog $SerialLog "LeonOS shell app=net" 90000
-    Send-MonitorCommand $Writer $Stream "sendkey n"
 
     $LoadedText = Wait-LeonOsSerialLog `
         $SerialLog "HTML REDRAW TEXT Email or phone" ($TimeoutSeconds * 1000)
@@ -201,7 +200,7 @@ foreach ($Bad in @(
     "user app not found", "user app bad", "user app read failed",
     "LeonOS user heap exhausted", "NetSurf abort", "DIE ",
     "CPU exception", "PANIC", "NETSURF QUICKJS EXCEPTION",
-    "NETSURF QUICKJS EVENT EXCEPTION")) {
+    "NETSURF QUICKJS EVENT EXCEPTION", "WINDOW TRACK ARGS BAD")) {
     if ($Output -like "*$Bad*") {
         throw "NetSurf Gmail input test hit failure: $Bad"
     }

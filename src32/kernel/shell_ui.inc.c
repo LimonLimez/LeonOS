@@ -2908,6 +2908,19 @@ static u8 shell_restore_or_create_window(u8 type)
     return shell_create(type, x, y, w, h);
 }
 
+static u8 shell_netsurf_app_available(void)
+{
+    u32 cluster = 0u;
+    u32 size = 0u;
+    if (!using_fat32) {
+        return 0u;
+    }
+    if (find_loaded_file("NETSURF.LEO", &cluster, &size)) {
+        return 1u;
+    }
+    return fat32_find_file_raw(leo_netsurf_name, &cluster, &size);
+}
+
 void shell_browser_launch_pending_url(const char *url)
 {
     u32 pos = 0u;
@@ -2935,6 +2948,10 @@ static u8 shell_launch_app(u8 app_id)
     shell_serial_event(shell_app_msg(app_id));
     if (app_id == SHELL_APP_NET) {
         u8 opened = shell_restore_or_create_window(SHELL_WIN_NET) != 0xFFu;
+        if (opened && !user_app_running && shell_netsurf_app_available()) {
+            pending_user_app = USER_APP_NETSURF;
+            serial_print("LeonOS shell browser launching NetSurf\r\n");
+        }
         shell_ui_pulse();
         dirty = 1;
         return opened;
