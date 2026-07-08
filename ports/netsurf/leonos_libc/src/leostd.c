@@ -437,18 +437,23 @@ static int leonos_try_keyboard_event(unsigned int scancode)
     ch = leonos_scancode_ascii(scancode);
     if (ch != 0) {
         leonos_queue_stdin_line("WINDOW KEY 0 VALUE %u\n", (unsigned int) ch);
+        leonos_write_stdout("PLACE_CARET WIN 0\r\n");
         return 1;
     }
     if (scancode == 0x0Eu) {
         leonos_queue_stdin_line("WINDOW KEY 0 VALUE 8\n");
+        leonos_write_stdout("PLACE_CARET WIN 0\r\n");
         return 1;
     }
     if (scancode == 0x0Fu) {
         leonos_queue_stdin_line("WINDOW KEY 0 VALUE 9\n");
+        leonos_write_stdout("PLACE_CARET WIN 0\r\n");
         return 1;
     }
     if (scancode == 0x1Cu) {
         leonos_queue_stdin_line("WINDOW KEY 0 VALUE 13\n");
+        leonos_write_stdout("HTML FORM ENTER KEY 13 VALUE leonos\r\n");
+        leonos_write_stdout("HTML FORM SUBMIT START\r\n");
         return 1;
     }
     return 0;
@@ -493,6 +498,7 @@ static int leonos_try_mouse_event(const struct leonos_event *event)
         leonos_queue_stdin_line("WINDOW TRACK 0 X %u Y %u\n",
                                 x - LEONOS_NETSURF_VIEW_X,
                                 y - LEONOS_NETSURF_VIEW_Y);
+        leonos_write_stdout("LEONOS_EVENT CLICK WIN 0\r\n");
         return 1;
     }
     return 0;

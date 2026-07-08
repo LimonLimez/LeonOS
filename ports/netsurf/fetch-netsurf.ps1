@@ -54,7 +54,8 @@ $Repos = @(
     "libnsutils",
     "libnsfb",
     "nsgenbind",
-    "netsurf"
+    "netsurf",
+    "stb"
 )
 
 foreach ($Repo in $Repos) {
@@ -64,7 +65,11 @@ foreach ($Repo in $Repos) {
         continue
     }
 
-    $Url = "$RepositoryBase/$Repo.git"
+    $Url = if ($Repo -eq "stb") {
+        "https://github.com/nothings/stb.git"
+    } else {
+        "$RepositoryBase/$Repo.git"
+    }
     Write-Host "Cloning $Repo from $Url"
     if ($Repo -eq "libnsbmp" -or $Repo -eq "libnsgif") {
         # Some image libs have AFL fixture filenames containing ':' characters,

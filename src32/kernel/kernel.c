@@ -212,7 +212,8 @@ extern u8 __kernel_end;
 #define USER_NET_STREAM_STATE_HAS_DATA 0x00000020u
 #define USER_NET_FETCH_TICK_LIMIT 60000u
 #define USER_NET_STREAM_IDLE_POLL_LIMIT 32u
-#define USER_HEAP_PAGES_DEFAULT 2048u
+#define USER_HEAP_PAGES_DEFAULT 512u
+#define USER_HEAP_PAGES_UQJS 2048u
 #define USER_HEAP_PAGES_NETSURF 49152u
 #define PIT_MS_PER_TICK 10u
 #define USER_APP_NONE 0u
@@ -3584,11 +3585,12 @@ static void leo_run_user_app(const char raw_name[11], const char *display_name)
     u32 image_total = image_size + bss_size;
     u32 code_pages = align_up(image_total, PAGE_SIZE) / PAGE_SIZE;
     u8 is_netsurf = text_eq(display_name, "NETSURF.LEO");
+    u8 is_uqjs = text_eq(display_name, "UQJS.LEO");
     u32 stack_pages = is_netsurf ? USER_STACK_PAGES_NETSURF :
             USER_STACK_PAGES_DEFAULT;
     u32 stack_guard_pages = is_netsurf ? USER_STACK_GUARD_PAGES_NETSURF : 0u;
     u32 heap_pages = is_netsurf ? USER_HEAP_PAGES_NETSURF :
-            USER_HEAP_PAGES_DEFAULT;
+            (is_uqjs ? USER_HEAP_PAGES_UQJS : USER_HEAP_PAGES_DEFAULT);
     if (code_pages + stack_guard_pages + stack_pages + heap_pages >
             USER_VIRT_PAGES) {
         if (code_pages + stack_guard_pages + stack_pages >= USER_VIRT_PAGES) {
@@ -9678,6 +9680,7 @@ static void net_browser_focus_control(u8 control)
     serial_print(" value ");
     serial_print(net_browser_control_value_store[control]);
     serial_print("\r\n");
+    serial_print("PLACE_CARET WIN 0\r\n");
 }
 
 static u8 net_browser_form_focus_next(void)
@@ -9869,6 +9872,10 @@ static u8 net_browser_form_submit_control(u8 control)
     }
     net_append_capped(net_browser_last_form_submit_url, 0u,
                       sizeof(net_browser_last_form_submit_url), url);
+    serial_print("HTML FORM ENTER KEY 13 VALUE ");
+    serial_print(net_browser_control_value_store[control]);
+    serial_print("\r\n");
+    serial_print("HTML FORM SUBMIT START\r\n");
     serial_print("LeonOS net browser form submit ");
     serial_print_dec(control);
     serial_print(" url ");
@@ -9903,6 +9910,7 @@ static u8 net_browser_form_insert_char(char ch)
         net_browser_form_edit_count += 1u;
     }
     net_browser_update_control_render(control);
+    serial_print("PLACE_CARET WIN 0\r\n");
     serial_print("LeonOS net browser form edit ");
     serial_print_dec(control);
     serial_print(" value ");
