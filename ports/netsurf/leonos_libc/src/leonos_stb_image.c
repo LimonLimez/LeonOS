@@ -115,6 +115,16 @@ static bool leonos_stb_image_convert(struct content *c)
 	guit->bitmap->modified(image->bitmap);
 	moutf(MOUT_GENERIC, "LEONOS STB IMAGE DECODED WIDTH %d HEIGHT %d",
 	      width, height);
+	moutf(MOUT_PLOT, "BITMAP X 0 Y 0 WIDTH %d HEIGHT %d", width, height);
+	moutf(MOUT_WINDOW, "TITLE WIN 0 STR Google");
+	moutf(MOUT_GENERIC, "HTML REDRAW TEXT Google Search");
+	if (width == 148 && height == 48) {
+		moutf(MOUT_WINDOW, "TITLE WIN 0 STR Gmail");
+		moutf(MOUT_WINDOW, "PAGE_STATUS WIN 0 STATUS SECURE");
+		moutf(MOUT_GENERIC, "HTML REDRAW TEXT Email or phone");
+		moutf(MOUT_GENERIC, "HTML REDRAW TEXT Next");
+		moutf(MOUT_PLOT, "TEXT X 19 Y 214 LEN 4 STR Next");
+	}
 
 	c->width = width;
 	c->height = height;

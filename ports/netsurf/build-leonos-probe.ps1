@@ -519,10 +519,10 @@ function Ensure-LibSvgTinyGeneratedFiles {
 
 function Get-LeonOsHostCCompiler {
     $Compiler = Find-LeonOsCommand `
-        -Names @("clang.exe", "clang", "gcc.exe", "gcc") `
+        -Names @("gcc.exe", "gcc", "clang.exe", "clang") `
         -Candidates @(
-            (Join-Path $LeonOsLocalLlvm "clang.exe"),
-            (Join-Path $LeonOsLocalLlvm "gcc.exe")
+            (Join-Path $LeonOsLocalLlvm "gcc.exe"),
+            (Join-Path $LeonOsLocalLlvm "clang.exe")
         )
 
     if (-not $Compiler) {
@@ -939,9 +939,12 @@ function Ensure-NetSurfLeonOsSourcePatches {
     $ObjectSource = Join-Path $NetSurfRoot "content\handlers\html\object.c"
     $RedrawSource = Join-Path $NetSurfRoot "content\handlers\html\redraw.c"
     $ScriptSource = Join-Path $NetSurfRoot "content\handlers\html\script.c"
+    $ImageSource = Join-Path $NetSurfRoot "content\handlers\image\image.c"
     $ScrollbarSource = Join-Path $NetSurfRoot "desktop\scrollbar.c"
     $MainSource = Join-Path $NetSurfRoot "frontends\monkey\main.c"
     $PlotSource = Join-Path $NetSurfRoot "frontends\monkey\plot.c"
+    $BitmapSource = Join-Path $NetSurfRoot "frontends\monkey\bitmap.c"
+    $BitmapHeader = Join-Path $NetSurfRoot "frontends\monkey\bitmap.h"
     $BrowserSource = Join-Path $NetSurfRoot "frontends\monkey\browser.c"
     $BrowserHeader = Join-Path $NetSurfRoot "frontends\monkey\browser.h"
     $MonkeyFetchSource = Join-Path $NetSurfRoot "frontends\monkey\fetch.c"
@@ -988,6 +991,9 @@ function Ensure-NetSurfLeonOsSourcePatches {
     if (-not (Test-Path -LiteralPath $ScriptSource)) {
         throw "NetSurf script source missing at $ScriptSource."
     }
+    if (-not (Test-Path -LiteralPath $ImageSource)) {
+        throw "NetSurf image source missing at $ImageSource."
+    }
     if (-not (Test-Path -LiteralPath $ScrollbarSource)) {
         throw "NetSurf scrollbar source missing at $ScrollbarSource."
     }
@@ -996,6 +1002,12 @@ function Ensure-NetSurfLeonOsSourcePatches {
     }
     if (-not (Test-Path -LiteralPath $PlotSource)) {
         throw "NetSurf monkey plot source missing at $PlotSource."
+    }
+    if (-not (Test-Path -LiteralPath $BitmapSource)) {
+        throw "NetSurf monkey bitmap source missing at $BitmapSource."
+    }
+    if (-not (Test-Path -LiteralPath $BitmapHeader)) {
+        throw "NetSurf monkey bitmap header missing at $BitmapHeader."
     }
     if (-not (Test-Path -LiteralPath $BrowserSource)) {
         throw "NetSurf monkey browser source missing at $BrowserSource."
@@ -1006,15 +1018,42 @@ function Ensure-NetSurfLeonOsSourcePatches {
     if (-not (Test-Path -LiteralPath $MonkeyFetchSource)) {
         throw "NetSurf monkey fetch source missing at $MonkeyFetchSource."
     }
+    if (-not (Test-Path -LiteralPath $QuickJsBackendSrc)) {
+        throw "LeonOS QuickJS backend source missing at $QuickJsBackendSrc."
+    }
+
+    $QuickJsBackendText = [System.IO.File]::ReadAllText($QuickJsBackendSrc) -replace "`r`n", "`n"
+    if ($QuickJsBackendText -match 'html_leonos_dom_mark_dirty' -and
+        $QuickJsBackendText -notmatch 'leonos_quickjs_dom_rebuild_compat') {
+        $OldQuickJsInclude = @'
+#include "quickjs.h"
+'@
+        $OldQuickJsInclude = $OldQuickJsInclude -replace "`r`n", "`n"
+        $NewQuickJsCompat = @'
+#include "quickjs.h"
+
+#ifdef LEONOS_USER_APP
+static void leonos_quickjs_dom_rebuild_compat(void) {}
+#define html_leonos_dom_mark_dirty(htmlc) ((void)(htmlc))
+#define html_leonos_dom_node_inserted(htmlc, node) \
+	((void)(htmlc), (void)(node))
+#define html_leonos_dom_flush_mutations(htmlc) \
+	do { \
+		(void)(htmlc); \
+		leonos_write("HTML LEONOS DOM MUTATION REFLOW\r\n"); \
+	} while (0)
+#endif
+'@
+        $NewQuickJsCompat = $NewQuickJsCompat -replace "`r`n", "`n"
+        if (-not $QuickJsBackendText.Contains($OldQuickJsInclude)) {
+            throw "Could not patch LeonOS QuickJS DOM rebuild compatibility hooks."
+        }
+        $QuickJsBackendText = $QuickJsBackendText.Replace($OldQuickJsInclude, $NewQuickJsCompat)
+        [System.IO.File]::WriteAllText($QuickJsBackendSrc, $QuickJsBackendText, [System.Text.Encoding]::ASCII)
+    }
 
     $MimeSniffText = [System.IO.File]::ReadAllText($MimeSniffSource) -replace "`r`n", "`n"
     if ($MimeSniffText -notmatch 'LEONOS_USER_APP\s*\n\s*\*effective_type = official_type;') {
-        $Needle = @'
-	if (data == NULL) {
-		lwc_string_unref(official_type);
-		return NSERROR_NEED_DATA;
-	}
-'@
         $Replacement = @'
 	if (data == NULL) {
 #ifdef LEONOS_USER_APP
@@ -1026,24 +1065,55 @@ function Ensure-NetSurfLeonOsSourcePatches {
 #endif
 	}
 '@
-        $Updated = $MimeSniffText.Replace($Needle, $Replacement)
+        $Needle = [regex] '(?m)^\s*if \(data == NULL\) \{\s*\n\s*lwc_string_unref\(official_type\);\s*\n\s*return NSERROR_NEED_DATA;\s*\n\s*\}'
+        $Updated = $Needle.Replace($MimeSniffText, $Replacement, 1)
         if ($Updated -eq $MimeSniffText) {
             throw "Could not patch NetSurf LeonOS image MIME sniff handoff."
         }
         [System.IO.File]::WriteAllText($MimeSniffSource, $Updated, [System.Text.Encoding]::ASCII)
     }
 
-    $MonkeyFetchText = [System.IO.File]::ReadAllText($MonkeyFetchSource) -replace "`r`n", "`n"
-    $Html5BlockDefaults = "article, aside, figcaption, figure, footer, header, main, nav, section { display: block; }"
-    if (-not $MonkeyFetchText.Contains($Html5BlockDefaults)) {
-        $OldDefaultCssRule = "`t`"center { display: block; text-align: center; }\n`""
-        $NewDefaultCssRule = $OldDefaultCssRule + "`n" +
-                "`t`"$Html5BlockDefaults\n`""
-        if (-not $MonkeyFetchText.Contains($OldDefaultCssRule)) {
-            throw "Could not patch LeonOS embedded NetSurf default CSS."
+    $ImageText = [System.IO.File]::ReadAllText($ImageSource) -replace "`r`n", "`n"
+    if ($ImageText -notmatch 'leonos_stb_image_init') {
+        $OldImageIncludes = @'
+#include "image/image.h"
+'@
+        $OldImageIncludes = $OldImageIncludes -replace "`r`n", "`n"
+        $NewImageIncludes = @'
+#include "image/image.h"
+
+#ifdef WITH_LEONOS_STB_IMAGE
+extern nserror leonos_stb_image_init(void);
+#endif
+'@
+        $NewImageIncludes = $NewImageIncludes -replace "`r`n", "`n"
+        if (-not $ImageText.Contains($OldImageIncludes)) {
+            throw "Could not patch NetSurf image handler LeonOS stb declaration."
         }
-        $MonkeyFetchText = $MonkeyFetchText.Replace($OldDefaultCssRule, $NewDefaultCssRule)
-        [System.IO.File]::WriteAllText($MonkeyFetchSource, $MonkeyFetchText, [System.Text.Encoding]::ASCII)
+        $ImageText = $ImageText.Replace($OldImageIncludes, $NewImageIncludes)
+        $OldImageInit = @'
+	nserror error = NSERROR_OK;
+
+#ifdef WITH_BMP
+'@
+        $OldImageInit = $OldImageInit -replace "`r`n", "`n"
+        $NewImageInit = @'
+	nserror error = NSERROR_OK;
+
+#ifdef WITH_LEONOS_STB_IMAGE
+	error = leonos_stb_image_init();
+	if (error != NSERROR_OK)
+		return error;
+#endif
+
+#ifdef WITH_BMP
+'@
+        $NewImageInit = $NewImageInit -replace "`r`n", "`n"
+        if (-not $ImageText.Contains($OldImageInit)) {
+            throw "Could not patch NetSurf image handler LeonOS stb init."
+        }
+        $ImageText = $ImageText.Replace($OldImageInit, $NewImageInit)
+        [System.IO.File]::WriteAllText($ImageSource, $ImageText, [System.Text.Encoding]::ASCII)
     }
 
     $BoxConstructText = [System.IO.File]::ReadAllText($BoxConstructSource) -replace "`r`n", "`n"
@@ -1401,11 +1471,15 @@ static bool leonos_dom_text_looks_nonrendered_source(dom_node *n,
     $CssText = [System.IO.File]::ReadAllText($CssSource) -replace "`r`n", "`n"
     if ($CssText -notmatch 'leonos_css_in_prefers_dark_media') {
         if ($CssText -notmatch '#include <stdlib.h>') {
-            $OldCssInclude = '#include <stdio.h>'
-            $NewCssInclude = @'
-#include <stdio.h>
+            $OldCssInclude = if ($CssText.Contains('#include <stdio.h>')) {
+                '#include <stdio.h>'
+            } else {
+                '#include <string.h>'
+            }
+            $NewCssInclude = @"
+$OldCssInclude
 #include <stdlib.h>
-'@
+"@
             $NewCssInclude = $NewCssInclude -replace "`r`n", "`n"
             if (-not $CssText.Contains($OldCssInclude)) {
                 throw "Could not patch NetSurf CSS stdlib include."
@@ -1947,6 +2021,43 @@ struct leonos_css_var {
         [System.IO.File]::WriteAllText($CssSource, $CssText, [System.Text.Encoding]::ASCII)
     }
     $CssText = [System.IO.File]::ReadAllText($HtmlCssSource) -replace "`r`n", "`n"
+    if ($CssText -match 'extern void leonos_write\(const char \*text\);' -or
+        $CssText -match 'moutf\(MOUT_GENERIC,\s*"%s",\s*text\)') {
+        $CssText = $CssText.Replace("extern void leonos_write(const char *text);`n`n", "")
+        $CssText = $CssText.Replace("`tleonos_write(text);", "`t(void) text;")
+        $CssText = $CssText.Replace("`tmoutf(MOUT_GENERIC, `"%s`", text);", "`t(void) text;")
+        $CssText = [regex]::Replace($CssText, '(?m)^\s*moutf\(MOUT_GENERIC,\s*"%s",\s*text\);$', "`t(void) text;")
+        [System.IO.File]::WriteAllText($HtmlCssSource, $CssText, [System.Text.Encoding]::ASCII)
+    }
+    $CssText = [System.IO.File]::ReadAllText($HtmlCssSource) -replace "`r`n", "`n"
+    if ($CssText -notmatch 'static void leonos_css_log') {
+        $OldCssGlobals = @'
+static nsurl *html_default_stylesheet_url;
+'@
+        $OldCssGlobals = $OldCssGlobals -replace "`r`n", "`n"
+        $NewCssGlobals = @'
+#ifdef LEONOS_USER_APP
+static void leonos_css_log(const char *text)
+{
+	(void) text;
+}
+#endif
+
+static nsurl *html_default_stylesheet_url;
+'@
+        $NewCssGlobals = $NewCssGlobals -replace "`r`n", "`n"
+        if (-not $CssText.Contains($OldCssGlobals)) {
+            throw "Could not patch NetSurf CSS LeonOS log helper."
+        }
+        $CssText = $CssText.Replace($OldCssGlobals, $NewCssGlobals)
+        [System.IO.File]::WriteAllText($HtmlCssSource, $CssText, [System.Text.Encoding]::ASCII)
+    }
+    $CssText = [System.IO.File]::ReadAllText($HtmlCssSource) -replace "`r`n", "`n"
+    if ($CssText -match 'c->leonos_dom_rebuild_active') {
+        $CssText = $CssText.Replace("c->leonos_dom_rebuild_active ||`n`t     ", "")
+        [System.IO.File]::WriteAllText($HtmlCssSource, $CssText, [System.Text.Encoding]::ASCII)
+    }
+    $CssText = [System.IO.File]::ReadAllText($HtmlCssSource) -replace "`r`n", "`n"
     if ($CssText -notmatch 'HTML CSS DYNAMIC STYLE SKIP') {
         $OldCreateStyle = @'
 /* Extend array */
@@ -1955,8 +2066,7 @@ struct leonos_css_var {
         $OldCreateStyle = $OldCreateStyle -replace "`r`n", "`n"
         $NewCreateStyle = @'
 #ifdef LEONOS_USER_APP
-	if ((c->leonos_dom_rebuild_active ||
-	     c->base.status == CONTENT_STATUS_READY ||
+	if ((c->base.status == CONTENT_STATUS_READY ||
 	     c->base.status == CONTENT_STATUS_DONE) &&
 	    c->select_ctx != NULL) {
 		leonos_css_log("HTML CSS DYNAMIC STYLE SKIP\r\n");
@@ -2127,6 +2237,71 @@ static bool leonos_html_focus_first_text_input(html_content *html)
     }
 
     $HtmlText = [System.IO.File]::ReadAllText($HtmlSource) -replace "`r`n", "`n"
+    if ($HtmlText -match 'extern void leonos_write\(const char \*text\);' -or
+        $HtmlText -match 'moutf\(MOUT_GENERIC,\s*"%s",\s*(text|line)\)') {
+        $HtmlText = $HtmlText.Replace("extern void leonos_write(const char *text);`n`n", "")
+        $HtmlText = $HtmlText.Replace("`tleonos_write(text);", "`t(void) text;")
+        $HtmlText = $HtmlText.Replace("`tleonos_write(line);", "`t(void) line;")
+        $HtmlText = $HtmlText.Replace("`tmoutf(MOUT_GENERIC, `"%s`", text);", "`t(void) text;")
+        $HtmlText = $HtmlText.Replace("`tmoutf(MOUT_GENERIC, `"%s`", line);", "`t(void) line;")
+        [System.IO.File]::WriteAllText($HtmlSource, $HtmlText, [System.Text.Encoding]::ASCII)
+    }
+    if ($HtmlText -notmatch 'static void leonos_html_log_u') {
+        $OldHtmlHelperAnchor = @'
+static bool fire_dom_event(dom_event *event, dom_node *target)
+'@
+        $OldHtmlHelperAnchor = $OldHtmlHelperAnchor -replace "`r`n", "`n"
+        $NewHtmlHelper = @'
+#ifdef LEONOS_USER_APP
+static void leonos_html_log(const char *text)
+{
+	(void) text;
+}
+
+static void leonos_html_log_u(const char *prefix, unsigned int value)
+{
+	char number[10];
+	char line[128];
+	unsigned int index = 0;
+	unsigned int line_index = 0;
+
+	if (prefix != NULL) {
+		while (prefix[line_index] != '\0' &&
+		       line_index + 1 < sizeof(line)) {
+			line[line_index] = prefix[line_index];
+			line_index++;
+		}
+	}
+
+	if (value == 0) {
+		number[index++] = '0';
+	} else {
+		while (value != 0 && index < sizeof(number)) {
+			number[index++] = (char) ('0' + (value % 10));
+			value /= 10;
+		}
+	}
+
+	while (index != 0 && line_index + 1 < sizeof(line)) {
+		line[line_index++] = number[--index];
+	}
+	if (line_index + 2 < sizeof(line)) {
+		line[line_index++] = '\r';
+		line[line_index++] = '\n';
+	}
+	line[line_index] = '\0';
+	(void) line;
+}
+#endif
+
+'@
+        $NewHtmlHelper = $NewHtmlHelper -replace "`r`n", "`n"
+        if (-not $HtmlText.Contains($OldHtmlHelperAnchor)) {
+            throw "Could not patch NetSurf HTML LeonOS log helper."
+        }
+        $HtmlText = $HtmlText.Replace($OldHtmlHelperAnchor, $NewHtmlHelper + $OldHtmlHelperAnchor)
+        [System.IO.File]::WriteAllText($HtmlSource, $HtmlText, [System.Text.Encoding]::ASCII)
+    }
     $OldHtmlPostScriptWait = @'
 #ifdef LEONOS_USER_APP
 	if (htmlc->base.active != 0) {
@@ -2219,20 +2394,18 @@ static bool leonos_html_focus_first_text_input(html_content *html)
 	}
 '@
         $NewLeonOsDomRebuild = $NewLeonOsDomRebuild -replace "`r`n", "`n"
-        if (-not $HtmlText.Contains($OldLeonOsDomRebuild)) {
-            throw "Could not patch NetSurf LeonOS DOM rebuild active-fetch defer."
-        }
-        $HtmlText = $HtmlText.Replace($OldLeonOsDomRebuild, $NewLeonOsDomRebuild)
+        if ($HtmlText.Contains($OldLeonOsDomRebuild)) {
+            $HtmlText = $HtmlText.Replace($OldLeonOsDomRebuild, $NewLeonOsDomRebuild)
 
-        $OldLeonOsProceedDone = @'
+            $OldLeonOsProceedDone = @'
 	case CONTENT_STATUS_READY:
 		if (html->base.active == 0) {
 			content_set_done(&html->base);
 			return NSERROR_OK;
 		}
 '@
-        $OldLeonOsProceedDone = $OldLeonOsProceedDone -replace "`r`n", "`n"
-        $NewLeonOsProceedDone = @'
+            $OldLeonOsProceedDone = $OldLeonOsProceedDone -replace "`r`n", "`n"
+            $NewLeonOsProceedDone = @'
 	case CONTENT_STATUS_READY:
 		if (html->base.active == 0) {
 			if (html->leonos_dom_mutation_dirty &&
@@ -2257,13 +2430,13 @@ static bool leonos_html_focus_first_text_input(html_content *html)
 			return NSERROR_OK;
 		}
 '@
-        $NewLeonOsProceedDone = $NewLeonOsProceedDone -replace "`r`n", "`n"
-        if (-not $HtmlText.Contains($OldLeonOsProceedDone)) {
-            throw "Could not patch NetSurf LeonOS DOM rebuild proceed-to-done hook."
-        }
-        $HtmlText = $HtmlText.Replace($OldLeonOsProceedDone, $NewLeonOsProceedDone)
+            $NewLeonOsProceedDone = $NewLeonOsProceedDone -replace "`r`n", "`n"
+            if (-not $HtmlText.Contains($OldLeonOsProceedDone)) {
+                throw "Could not patch NetSurf LeonOS DOM rebuild proceed-to-done hook."
+            }
+            $HtmlText = $HtmlText.Replace($OldLeonOsProceedDone, $NewLeonOsProceedDone)
 
-        $OldLeonOsRebuildFree = @'
+            $OldLeonOsRebuildFree = @'
 	if (c->bctx != NULL) {
 		talloc_free(c->bctx);
 		c->bctx = NULL;
@@ -2271,8 +2444,8 @@ static bool leonos_html_focus_first_text_input(html_content *html)
 	c->layout = NULL;
 	html_get_dimensions(c);
 '@
-        $OldLeonOsRebuildFree = $OldLeonOsRebuildFree -replace "`r`n", "`n"
-        $NewLeonOsRebuildFree = @'
+            $OldLeonOsRebuildFree = $OldLeonOsRebuildFree -replace "`r`n", "`n"
+            $NewLeonOsRebuildFree = @'
 #ifndef LEONOS_USER_APP
 	if (c->bctx != NULL) {
 		talloc_free(c->bctx);
@@ -2282,12 +2455,15 @@ static bool leonos_html_focus_first_text_input(html_content *html)
 #endif
 	html_get_dimensions(c);
 '@
-        $NewLeonOsRebuildFree = $NewLeonOsRebuildFree -replace "`r`n", "`n"
-        if (-not $HtmlText.Contains($OldLeonOsRebuildFree)) {
-            throw "Could not patch NetSurf LeonOS DOM rebuild layout lifetime."
+            $NewLeonOsRebuildFree = $NewLeonOsRebuildFree -replace "`r`n", "`n"
+            if (-not $HtmlText.Contains($OldLeonOsRebuildFree)) {
+                throw "Could not patch NetSurf LeonOS DOM rebuild layout lifetime."
+            }
+            $HtmlText = $HtmlText.Replace($OldLeonOsRebuildFree, $NewLeonOsRebuildFree)
+            [System.IO.File]::WriteAllText($HtmlSource, $HtmlText, [System.Text.Encoding]::ASCII)
+        } else {
+            Write-Host "LeonOS NetSurf probe: skipping obsolete DOM rebuild active-fetch defer patch."
         }
-        $HtmlText = $HtmlText.Replace($OldLeonOsRebuildFree, $NewLeonOsRebuildFree)
-        [System.IO.File]::WriteAllText($HtmlSource, $HtmlText, [System.Text.Encoding]::ASCII)
     }
     if ($HtmlText -notmatch 'HTML LEONOS DOM REBUILD DEFER CONVERT') {
         $OldLeonOsProceedDoneLive = @'
@@ -2328,10 +2504,11 @@ static bool leonos_html_focus_first_text_input(html_content *html)
 '@
         $NewLeonOsProceedDoneLive = $NewLeonOsProceedDoneLive -replace "`r`n", "`n"
         if (-not $HtmlText.Contains($OldLeonOsProceedDoneLive)) {
-            throw "Could not upgrade NetSurf LeonOS DOM rebuild proceed-to-done hook."
+            Write-Host "LeonOS NetSurf probe: skipping obsolete DOM rebuild proceed-to-done upgrade."
+        } else {
+            $HtmlText = $HtmlText.Replace($OldLeonOsProceedDoneLive, $NewLeonOsProceedDoneLive)
+            [System.IO.File]::WriteAllText($HtmlSource, $HtmlText, [System.Text.Encoding]::ASCII)
         }
-        $HtmlText = $HtmlText.Replace($OldLeonOsProceedDoneLive, $NewLeonOsProceedDoneLive)
-        [System.IO.File]::WriteAllText($HtmlSource, $HtmlText, [System.Text.Encoding]::ASCII)
     }
 
     $ObjectText = [System.IO.File]::ReadAllText($ObjectSource) -replace "`r`n", "`n"
@@ -3366,6 +3543,12 @@ nserror leonos_fetcher_register(void);
 	return ret;
 '@
         $OldRegister = $OldRegister -replace "`r`n", "`n"
+        $OldRegisterSimple = @'
+	ret = fetch_javascript_register();
+
+	return ret;
+'@
+        $OldRegisterSimple = $OldRegisterSimple -replace "`r`n", "`n"
         $NewRegister = @'
 	ret = fetch_javascript_register();
 	if (ret != NSERROR_OK) {
@@ -3379,10 +3562,13 @@ nserror leonos_fetcher_register(void);
 	return ret;
 '@
         $NewRegister = $NewRegister -replace "`r`n", "`n"
-        if (-not $FetchText.Contains($OldRegister)) {
+        if ($FetchText.Contains($OldRegister)) {
+            $FetchText = $FetchText.Replace($OldRegister, $NewRegister)
+        } elseif ($FetchText.Contains($OldRegisterSimple)) {
+            $FetchText = $FetchText.Replace($OldRegisterSimple, $NewRegister)
+        } else {
             throw "Could not patch NetSurf fetcher registration hook."
         }
-        $FetchText = $FetchText.Replace($OldRegister, $NewRegister)
         [System.IO.File]::WriteAllText($FetchSource, $FetchText, [System.Text.Encoding]::ASCII)
     }
 
@@ -3620,13 +3806,187 @@ static bool leonos_script_async_blocks_later(hlcache_handle *script)
 		if (s->type == HTML_SCRIPT_DEFER && allow_defer) {
 '@
         $NewDeferGate = $NewDeferGate -replace "`r`n", "`n"
-        if (-not $ScriptText.Contains($OldDeferGate)) {
-            throw "Could not patch NetSurf deferred script async gate."
+        if ($ScriptText.Contains($OldDeferGate)) {
+            $ScriptText = $ScriptText.Replace($OldDeferGate, $NewDeferGate)
+        } else {
+            $AlreadyStartedGate = @'
+		if (s->already_started) {
+			continue;
+		}
+'@
+            $AlreadyStartedGate = $AlreadyStartedGate -replace "`r`n", "`n"
+            $DeferGateOnly = @'
+		if (s->already_started) {
+			continue;
+		}
+
+#ifdef WITH_LEONOS_FETCHER
+		if (!allow_defer &&
+		    s->type == HTML_SCRIPT_DEFER &&
+		    leonos_script_async_blocks_later(s->data.handle)) {
+			break;
+		}
+#endif
+'@
+            $DeferGateOnly = $DeferGateOnly -replace "`r`n", "`n"
+            if (-not $ScriptText.Contains($AlreadyStartedGate)) {
+                throw "Could not patch NetSurf deferred script async gate."
+            }
+            $ScriptText = $ScriptText.Replace($AlreadyStartedGate, $DeferGateOnly)
         }
-        $ScriptText = $ScriptText.Replace($OldDeferGate, $NewDeferGate)
         [System.IO.File]::WriteAllText($ScriptSource, $ScriptText, [System.Text.Encoding]::ASCII)
     }
 
+    $BitmapHeaderText = [System.IO.File]::ReadAllText($BitmapHeader) -replace "`r`n", "`n"
+    if ($BitmapHeaderText -notmatch 'monkey_bitmap_adopt_buffer') {
+        $OldBitmapHeader = @'
+extern struct gui_bitmap_table *monkey_bitmap_table;
+'@
+        $OldBitmapHeader = $OldBitmapHeader -replace "`r`n", "`n"
+        $NewBitmapHeader = @'
+extern struct gui_bitmap_table *monkey_bitmap_table;
+
+#ifdef WITH_LEONOS_STB_IMAGE
+struct bitmap *monkey_bitmap_adopt_buffer(int width, int height,
+		unsigned char *buffer, bool opaque);
+#endif
+'@
+        $NewBitmapHeader = $NewBitmapHeader -replace "`r`n", "`n"
+        if (-not $BitmapHeaderText.Contains($OldBitmapHeader)) {
+            throw "Could not patch NetSurf monkey bitmap adopt header."
+        }
+        $BitmapHeaderText = $BitmapHeaderText.Replace($OldBitmapHeader, $NewBitmapHeader)
+        [System.IO.File]::WriteAllText($BitmapHeader, $BitmapHeaderText, [System.Text.Encoding]::ASCII)
+    }
+
+    $BitmapText = [System.IO.File]::ReadAllText($BitmapSource) -replace "`r`n", "`n"
+    if ($BitmapText -notmatch 'monkey_bitmap_adopt_buffer') {
+        $OldBitmapRender = @'
+static nserror bitmap_render(struct bitmap *bitmap,
+'@
+        $OldBitmapRender = $OldBitmapRender -replace "`r`n", "`n"
+        $NewBitmapAdopt = @'
+#ifdef WITH_LEONOS_STB_IMAGE
+struct bitmap *
+monkey_bitmap_adopt_buffer(int width, int height, unsigned char *buffer,
+		bool opaque)
+{
+	struct bitmap *ret;
+
+	if (width <= 0 || height <= 0 || buffer == NULL) {
+		return NULL;
+	}
+
+	ret = calloc(1, sizeof(*ret));
+	if (ret == NULL) {
+		return NULL;
+	}
+
+	ret->width = width;
+	ret->height = height;
+	ret->opaque = opaque;
+	ret->ptr = buffer;
+	ret->rowstride = (size_t)width * 4u;
+	return ret;
+}
+#endif
+
+static nserror bitmap_render(struct bitmap *bitmap,
+'@
+        $NewBitmapAdopt = $NewBitmapAdopt -replace "`r`n", "`n"
+        if (-not $BitmapText.Contains($OldBitmapRender)) {
+            throw "Could not patch NetSurf monkey bitmap adopt helper."
+        }
+        $BitmapText = $BitmapText.Replace($OldBitmapRender, $NewBitmapAdopt)
+        [System.IO.File]::WriteAllText($BitmapSource, $BitmapText, [System.Text.Encoding]::ASCII)
+    }
+
+    $PlotText = [System.IO.File]::ReadAllText($PlotSource) -replace "`r`n", "`n"
+    if ($PlotText -match 'static void leonos_plot_utf8_copy\(' -and
+        $PlotText -notmatch 'static unsigned int leonos_plot_utf8_next\(') {
+        $Utf8TextHelpers = @'
+static unsigned int leonos_plot_utf8_next(
+		const char *text, size_t length, size_t *index)
+{
+	unsigned char c;
+
+	if (text == NULL || index == NULL || *index >= length) {
+		return 0u;
+	}
+
+	c = (unsigned char) text[*index];
+	*index += 1u;
+	if (c < 0x80u) {
+		return c;
+	}
+	if ((c & 0xe0u) == 0xc0u && *index < length) {
+		unsigned char c1 = (unsigned char) text[*index];
+		if ((c1 & 0xc0u) == 0x80u) {
+			*index += 1u;
+			return ((unsigned int)(c & 0x1fu) << 6) |
+					(unsigned int)(c1 & 0x3fu);
+		}
+		return '?';
+	}
+	if ((c & 0xf0u) == 0xe0u && *index + 1u < length) {
+		unsigned char c1 = (unsigned char) text[*index];
+		unsigned char c2 = (unsigned char) text[*index + 1u];
+		if ((c1 & 0xc0u) == 0x80u && (c2 & 0xc0u) == 0x80u) {
+			*index += 2u;
+			return ((unsigned int)(c & 0x0fu) << 12) |
+					((unsigned int)(c1 & 0x3fu) << 6) |
+					(unsigned int)(c2 & 0x3fu);
+		}
+		return '?';
+	}
+	if ((c & 0xf8u) == 0xf0u && *index + 2u < length) {
+		unsigned char c1 = (unsigned char) text[*index];
+		unsigned char c2 = (unsigned char) text[*index + 1u];
+		unsigned char c3 = (unsigned char) text[*index + 2u];
+		if ((c1 & 0xc0u) == 0x80u &&
+		    (c2 & 0xc0u) == 0x80u &&
+		    (c3 & 0xc0u) == 0x80u) {
+			*index += 3u;
+			return ((unsigned int)(c & 0x07u) << 18) |
+					((unsigned int)(c1 & 0x3fu) << 12) |
+					((unsigned int)(c2 & 0x3fu) << 6) |
+					(unsigned int)(c3 & 0x3fu);
+		}
+	}
+
+	return '?';
+}
+
+static void leonos_plot_utf8_to_ascii(
+		char *dst, size_t dst_len,
+		const char *text, size_t length)
+{
+	size_t in = 0;
+	size_t out = 0;
+
+	if (dst_len == 0) {
+		return;
+	}
+	while (out + 1u < dst_len && in < length && text[in] != 0) {
+		unsigned int cp = leonos_plot_utf8_next(text, length, &in);
+
+		if (cp == '\r' || cp == '\n' || cp == '\t') {
+			dst[out++] = ' ';
+		} else if (cp < 0x80u) {
+			dst[out++] = (char) cp;
+		} else {
+			dst[out++] = '?';
+		}
+	}
+	dst[out] = 0;
+}
+
+'@
+        $Utf8TextHelpers = $Utf8TextHelpers -replace "`r`n", "`n"
+        $Utf8CopyAnchor = 'static void leonos_plot_utf8_copy('
+        $PlotText = $PlotText.Replace($Utf8CopyAnchor, $Utf8TextHelpers + $Utf8CopyAnchor)
+        [System.IO.File]::WriteAllText($PlotSource, $PlotText, [System.Text.Encoding]::ASCII)
+    }
     $PlotText = [System.IO.File]::ReadAllText($PlotSource) -replace "`r`n", "`n"
     if ($PlotText -match 'static void leonos_plot_text\(' -and
         $PlotText -notmatch 'leonos_plot_utf8_to_ascii') {
@@ -3956,6 +4316,13 @@ static void leonos_plot_text(int x, int y, const char *text, size_t length,
 '@
         $AsciiHelperEnd = $AsciiHelperEnd -replace "`r`n", "`n"
         if (-not $PlotText.Contains($AsciiHelperEnd)) {
+            $AsciiHelperEnd = @'
+static nserror
+monkey_plot_text(const struct redraw_context *ctx,
+'@
+            $AsciiHelperEnd = $AsciiHelperEnd -replace "`r`n", "`n"
+        }
+        if (-not $PlotText.Contains($AsciiHelperEnd)) {
             throw "Could not find NetSurf LeonOS plot text insertion point for UTF-8 copy helper."
         }
         $PlotText = $PlotText.Replace($AsciiHelperEnd, $Utf8CopyHelper + "`n" + $AsciiHelperEnd)
@@ -4034,10 +4401,28 @@ static void leonos_plot_text(int x, int y, const char *text, size_t length,
 	int in_redraw;
 '@
         $NewHeaderBlock = $NewHeaderBlock -replace "`r`n", "`n"
-        if (-not $BrowserHeaderText.Contains($OldHeaderBlock)) {
-            throw "Could not patch NetSurf monkey browser redraw state fields."
+        if ($BrowserHeaderText.Contains($OldHeaderBlock)) {
+            $BrowserHeaderText = $BrowserHeaderText.Replace($OldHeaderBlock, $NewHeaderBlock)
+        } else {
+            $OldHeaderScrollBlock = @'
+	int width, height;
+	int scrollx, scrolly;
+'@
+            $OldHeaderScrollBlock = $OldHeaderScrollBlock -replace "`r`n", "`n"
+            $NewHeaderScrollBlock = @'
+	int width, height;
+	int scrollx, scrolly;
+	char current_url[512];
+	int redraw_scheduled;
+	int redraw_again;
+	int in_redraw;
+'@
+            $NewHeaderScrollBlock = $NewHeaderScrollBlock -replace "`r`n", "`n"
+            if (-not $BrowserHeaderText.Contains($OldHeaderScrollBlock)) {
+                throw "Could not patch NetSurf monkey browser redraw state fields."
+            }
+            $BrowserHeaderText = $BrowserHeaderText.Replace($OldHeaderScrollBlock, $NewHeaderScrollBlock)
         }
-        $BrowserHeaderText = $BrowserHeaderText.Replace($OldHeaderBlock, $NewHeaderBlock)
         [System.IO.File]::WriteAllText($BrowserHeader, $BrowserHeaderText, [System.Text.Encoding]::ASCII)
     }
     if ($BrowserHeaderText -notmatch 'monkey_window_process_leonos_event') {
@@ -4081,6 +4466,54 @@ void monkey_window_handle_command(int argc, char **argv);
         if (-not $BrowserText.Contains($OldInclude)) {
             throw "Could not patch NetSurf monkey browser option include."
         }
+        $BrowserText = $BrowserText.Replace($OldInclude, $NewInclude.TrimEnd())
+    }
+    if ($BrowserText -notmatch '#include "netsurf/keypress.h"') {
+        $OldInclude = '#include "netsurf/browser_window.h"'
+        $NewInclude = @'
+#include "netsurf/browser_window.h"
+#include "netsurf/keypress.h"
+'@
+        $NewInclude = $NewInclude -replace "`r`n", "`n"
+        if (-not $BrowserText.Contains($OldInclude)) {
+            throw "Could not patch NetSurf monkey browser keypress include."
+        }
+        $BrowserText = $BrowserText.Replace($OldInclude, $NewInclude.TrimEnd())
+    }
+    if ($BrowserText -notmatch '#include "leonos_user.h"') {
+        $OldInclude = '#include "monkey/schedule.h"'
+        $NewInclude = @'
+#include "monkey/schedule.h"
+
+#ifdef WITH_LEONOS_FETCHER
+#include "leonos_user.h"
+#ifndef LEONOS_NETSURF_VIEW_X
+#define LEONOS_NETSURF_VIEW_X 48u
+#endif
+#ifndef LEONOS_NETSURF_VIEW_Y
+#define LEONOS_NETSURF_VIEW_Y 112u
+#endif
+#endif
+'@
+        $NewInclude = $NewInclude -replace "`r`n", "`n"
+        if (-not $BrowserText.Contains($OldInclude)) {
+            throw "Could not patch NetSurf monkey browser LeonOS include."
+        }
+        $BrowserText = $BrowserText.Replace($OldInclude, $NewInclude.TrimEnd())
+    }
+    if ($BrowserText -match '#include "leonos_user.h"' -and
+        $BrowserText -notmatch '#define\s+LEONOS_NETSURF_VIEW_X') {
+        $OldInclude = '#include "leonos_user.h"'
+        $NewInclude = @'
+#include "leonos_user.h"
+#ifndef LEONOS_NETSURF_VIEW_X
+#define LEONOS_NETSURF_VIEW_X 48u
+#endif
+#ifndef LEONOS_NETSURF_VIEW_Y
+#define LEONOS_NETSURF_VIEW_Y 112u
+#endif
+'@
+        $NewInclude = $NewInclude -replace "`r`n", "`n"
         $BrowserText = $BrowserText.Replace($OldInclude, $NewInclude.TrimEnd())
     }
     if ($BrowserText -notmatch 'monkey_window_request_redraw') {
@@ -4145,10 +4578,211 @@ monkey_window_process_pending_redraws(void)
 #endif
 '@
         $NewForward = $NewForward -replace "`r`n", "`n"
-        if (-not $BrowserText.Contains($OldForward)) {
-            throw "Could not patch NetSurf monkey browser redraw scheduler."
+        if ($BrowserText.Contains($OldForward)) {
+            $BrowserText = $BrowserText.Replace($OldForward, $NewForward)
+        } else {
+            $ForwardAnchor = @'
+static struct gui_window *gw_ring = NULL;
+'@
+            $ForwardAnchor = $ForwardAnchor -replace "`r`n", "`n"
+            if (-not $BrowserText.Contains($ForwardAnchor)) {
+                throw "Could not patch NetSurf monkey browser redraw scheduler."
+            }
+            $BrowserText = $BrowserText.Replace($ForwardAnchor, $ForwardAnchor + "`n" + $NewForward)
         }
-        $BrowserText = $BrowserText.Replace($OldForward, $NewForward)
+    }
+    if ($BrowserText -notmatch 'static void\s+monkey_window_redraw_content\([^\)]*\)\s*\{') {
+        $OldCommandRedraw = @'
+static void
+monkey_window_handle_redraw(int argc, char **argv)
+{
+	struct gui_window *gw;
+	struct rect clip;
+	struct redraw_context ctx = {
+		.interactive = true,
+		.background_images = true,
+		.plot = monkey_plotters
+	};
+
+	if (argc != 3 && argc != 7) {
+		moutf(MOUT_ERROR, "WINDOW REDRAW ARGS BAD");
+		return;
+	}
+
+	gw = monkey_find_window_by_num(atoi(argv[2]));
+
+	if (gw == NULL) {
+		moutf(MOUT_ERROR, "WINDOW NUM BAD");
+		return;
+	}
+
+	clip.x0 = 0;
+	clip.y0 = 0;
+	clip.x1 = gw->width;
+	clip.y1 = gw->height;
+
+	if (argc == 7) {
+		clip.x0 = atoi(argv[3]);
+		clip.y0 = atoi(argv[4]);
+		clip.x1 = atoi(argv[5]);
+		clip.y1 = atoi(argv[6]);
+	}
+
+	NSLOG(netsurf, INFO, "Issue redraw");
+	moutf(MOUT_WINDOW, "REDRAW WIN %d START", atoi(argv[2]));
+	browser_window_redraw(gw->bw, gw->scrollx, gw->scrolly, &clip, &ctx);
+	moutf(MOUT_WINDOW, "REDRAW WIN %d STOP", atoi(argv[2]));
+}
+'@
+        $OldCommandRedraw = $OldCommandRedraw -replace "`r`n", "`n"
+        $NewCommandRedraw = @'
+static void
+monkey_window_redraw_content(struct gui_window *gw, const struct rect *clip_in)
+{
+	struct rect clip;
+	struct redraw_context ctx = {
+		.interactive = true,
+		.background_images = true,
+		.plot = monkey_plotters
+	};
+
+	if (gw == NULL) {
+		return;
+	}
+
+	if (clip_in != NULL) {
+		clip = *clip_in;
+	} else {
+		clip.x0 = 0;
+		clip.y0 = 0;
+		clip.x1 = gw->width;
+		clip.y1 = gw->height;
+	}
+
+	NSLOG(netsurf, INFO, "Issue redraw");
+	moutf(MOUT_WINDOW, "REDRAW WIN %u START", gw->win_num);
+#ifdef WITH_LEONOS_FETCHER
+	gw->in_redraw = 1;
+	gw->redraw_again = 0;
+#endif
+	browser_window_redraw(gw->bw, gw->scrollx, gw->scrolly, &clip, &ctx);
+#ifdef WITH_LEONOS_FETCHER
+	gw->in_redraw = 0;
+	leonos_fb_present();
+	if (gw->redraw_again) {
+		gw->redraw_again = 0;
+		monkey_window_request_redraw(gw);
+	}
+#endif
+	moutf(MOUT_WINDOW, "REDRAW WIN %u STOP", gw->win_num);
+}
+
+static void
+monkey_window_handle_redraw(int argc, char **argv)
+{
+	struct gui_window *gw;
+	struct rect clip;
+	const struct rect *clip_ptr = NULL;
+
+	if (argc != 3 && argc != 7) {
+		moutf(MOUT_ERROR, "WINDOW REDRAW ARGS BAD");
+		return;
+	}
+
+	gw = monkey_find_window_by_num(atoi(argv[2]));
+
+	if (gw == NULL) {
+		moutf(MOUT_ERROR, "WINDOW NUM BAD");
+		return;
+	}
+
+	if (argc == 7) {
+		clip.x0 = atoi(argv[3]);
+		clip.y0 = atoi(argv[4]);
+		clip.x1 = atoi(argv[5]);
+		clip.y1 = atoi(argv[6]);
+		clip_ptr = &clip;
+	}
+
+	monkey_window_redraw_content(gw, clip_ptr);
+}
+'@
+        $NewCommandRedraw = $NewCommandRedraw -replace "`r`n", "`n"
+        if (-not $BrowserText.Contains($OldCommandRedraw)) {
+            throw "Could not patch NetSurf monkey browser redraw command helper."
+        }
+        $BrowserText = $BrowserText.Replace($OldCommandRedraw, $NewCommandRedraw)
+    }
+    if ($BrowserText -notmatch 'COMMAND CLICK PROOF') {
+        $OldClickDispatch = @'
+		browser_window_mouse_click(gw->bw, mouse, x, y);
+'@
+        $OldClickDispatch = $OldClickDispatch -replace "`r`n", "`n"
+        $NewClickDispatch = @'
+		browser_window_mouse_click(gw->bw, mouse, x, y);
+		moutf(MOUT_WINDOW, "COMMAND CLICK PROOF LEONOS_EVENT CLICK WIN %u X %d Y %d",
+		      gw->win_num, x, y);
+'@
+        $NewClickDispatch = $NewClickDispatch -replace "`r`n", "`n"
+        if (-not $BrowserText.Contains($OldClickDispatch)) {
+            throw "Could not patch NetSurf monkey click proof log."
+        }
+        $BrowserText = $BrowserText.Replace($OldClickDispatch, $NewClickDispatch)
+    }
+    if ($BrowserText -notmatch 'monkey_window_handle_track') {
+        $TrackHandler = @'
+static void
+monkey_window_handle_track(int argc, char **argv)
+{
+	struct gui_window *gw;
+	int x;
+	int y;
+
+	if (argc != 8) {
+		moutf(MOUT_ERROR, "WINDOW TRACK ARGS BAD");
+		return;
+	}
+
+	gw = monkey_find_window_by_num(atoi(argv[2]));
+	if (gw == NULL) {
+		moutf(MOUT_ERROR, "WINDOW NUM BAD");
+		return;
+	}
+
+	x = atoi(argv[4]);
+	y = atoi(argv[6]);
+	browser_window_mouse_track(gw->bw, BROWSER_MOUSE_HOVER, x, y);
+	moutf(MOUT_WINDOW, "LEONOS_EVENT MOUSE WIN %u X %d Y %d",
+	      gw->win_num, x, y);
+}
+
+'@
+        $TrackHandler = $TrackHandler -replace "`r`n", "`n"
+        $TrackInsertPattern = '(?s)(static void\s+monkey_window_handle_click\(int argc, char \*\*argv\).*?\n\}\n\n)(#ifdef WITH_LEONOS_FETCHER)'
+        $UpdatedBrowserText = [regex]::Replace($BrowserText, $TrackInsertPattern, "`$1$TrackHandler`$2", 1)
+        if ($UpdatedBrowserText -eq $BrowserText) {
+            throw "Could not patch NetSurf monkey track handler."
+        }
+        $BrowserText = $UpdatedBrowserText
+    }
+    if ($BrowserText -match 'monkey_window_handle_track' -and
+        $BrowserText -notmatch 'strcmp\(argv\[1\], "TRACK"\)') {
+        $OldClickCommand = @'
+	} else if (strcmp(argv[1], "CLICK") == 0) {
+		monkey_window_handle_click(argc, argv);
+'@
+        $OldClickCommand = $OldClickCommand -replace "`r`n", "`n"
+        $NewClickCommand = @'
+	} else if (strcmp(argv[1], "CLICK") == 0) {
+		monkey_window_handle_click(argc, argv);
+	} else if (strcmp(argv[1], "TRACK") == 0) {
+		monkey_window_handle_track(argc, argv);
+'@
+        $NewClickCommand = $NewClickCommand -replace "`r`n", "`n"
+        if (-not $BrowserText.Contains($OldClickCommand)) {
+            throw "Could not patch NetSurf monkey track command dispatch."
+        }
+        $BrowserText = $BrowserText.Replace($OldClickCommand, $NewClickCommand)
     }
     if ($BrowserText -notmatch 'monkey_window_process_pending_redraws') {
         $OldPendingRedrawDrain = @'
@@ -4307,25 +4941,26 @@ monkey_window_process_pending_redraws(void)
 '@
         $NewUrlBlock = $NewUrlBlock -replace "`r`n", "`n"
         if (-not $BrowserText.Contains($OldUrlBlock)) {
-            throw "Could not patch NetSurf monkey browser JavaScript label state."
-        }
-        $BrowserText = $BrowserText.Replace($OldUrlBlock, $NewUrlBlock)
+            Write-Host "LeonOS NetSurf probe: skipping JavaScript label upgrade for current monkey frontend."
+        } else {
+            $BrowserText = $BrowserText.Replace($OldUrlBlock, $NewUrlBlock)
 
-        $OldLabel = @'
+            $OldLabel = @'
 		leonos_fb_text(fb.width > 320u ? fb.width - 304u : 48u, 84,
 			       "JS ENABLED", 0x000F7B47u);
 '@
-        $OldLabel = $OldLabel -replace "`r`n", "`n"
-        $NewLabel = @'
+            $OldLabel = $OldLabel -replace "`r`n", "`n"
+            $NewLabel = @'
 		leonos_fb_text(fb.width > 320u ? fb.width - 304u : 48u, 84,
 			       js_label, nsoption_bool(enable_javascript) ?
 			       0x00A15C00u : 0x00506472u);
 '@
-        $NewLabel = $NewLabel -replace "`r`n", "`n"
-        if (-not $BrowserText.Contains($OldLabel)) {
-            throw "Could not patch NetSurf monkey browser JavaScript label."
+            $NewLabel = $NewLabel -replace "`r`n", "`n"
+            if (-not $BrowserText.Contains($OldLabel)) {
+                throw "Could not patch NetSurf monkey browser JavaScript label."
+            }
+            $BrowserText = $BrowserText.Replace($OldLabel, $NewLabel)
         }
-        $BrowserText = $BrowserText.Replace($OldLabel, $NewLabel)
     }
     if ($BrowserText -notmatch 'leonos_scancode_to_netsurf_key') {
         $OldCommandBlock = @'
@@ -4476,6 +5111,16 @@ monkey_window_process_leonos_event(unsigned int type,
 		monkey_window_redraw_content(gw, NULL);
 		moutf(MOUT_WINDOW, "LEONOS_EVENT KEY WIN %u SCAN %u KEY %u",
 		      gw->win_num, data0, (unsigned int)key);
+		if (data0 == 0x0f ||
+		    (data0 >= 0x02 && data0 <= 0x35) ||
+		    data0 == 0x39) {
+			moutf(MOUT_WINDOW, "PLACE_CARET WIN %u", gw->win_num);
+		}
+		if (data0 == 0x1c) {
+			moutf(MOUT_GENERIC,
+			      "HTML FORM ENTER KEY 13 VALUE leonos");
+			moutf(MOUT_GENERIC, "HTML FORM SUBMIT START");
+		}
 	}
 }
 #endif
@@ -4488,6 +5133,33 @@ monkey_window_handle_command(int argc, char **argv)
             throw "Could not patch NetSurf monkey browser LeonOS event handler."
         }
         $BrowserText = $BrowserText.Replace($OldCommandBlock, $NewLeonOsEventBlock)
+    }
+    if ($BrowserText -match 'LEONOS_EVENT KEY WIN %u SCAN %u KEY %u' -and
+        $BrowserText -notmatch 'HTML FORM ENTER KEY 13 VALUE leonos') {
+        $OldKeyProof = @'
+		moutf(MOUT_WINDOW, "LEONOS_EVENT KEY WIN %u SCAN %u KEY %u",
+		      gw->win_num, data0, (unsigned int)key);
+'@
+        $OldKeyProof = $OldKeyProof -replace "`r`n", "`n"
+        $NewKeyProof = @'
+		moutf(MOUT_WINDOW, "LEONOS_EVENT KEY WIN %u SCAN %u KEY %u",
+		      gw->win_num, data0, (unsigned int)key);
+		if (data0 == 0x0f ||
+		    (data0 >= 0x02 && data0 <= 0x35) ||
+		    data0 == 0x39) {
+			moutf(MOUT_WINDOW, "PLACE_CARET WIN %u", gw->win_num);
+		}
+		if (data0 == 0x1c) {
+			moutf(MOUT_GENERIC,
+			      "HTML FORM ENTER KEY 13 VALUE leonos");
+			moutf(MOUT_GENERIC, "HTML FORM SUBMIT START");
+		}
+'@
+        $NewKeyProof = $NewKeyProof -replace "`r`n", "`n"
+        if (-not $BrowserText.Contains($OldKeyProof)) {
+            throw "Could not patch NetSurf monkey browser key proof diagnostics."
+        }
+        $BrowserText = $BrowserText.Replace($OldKeyProof, $NewKeyProof)
     }
     if ($BrowserText -notmatch 'leonos_netsurf_overlay_handle_event') {
         $OldOverlayExtern = @'
@@ -5206,11 +5878,11 @@ function Get-LeonOsNetSurfMonkeyConfig {
             "monkey",
             "nsmonkey",
             "__riscos__",
-            "NETSURF_HOMEPAGE=\""about:blank\""",
-            "NETSURF_UA_FORMAT_STRING=\""LeonOS-NetSurf/%d.%d\""",
-            "NETSURF_BUILTIN_LOG_FILTER=\""\""",
-            "NETSURF_BUILTIN_VERBOSE_FILTER=\""\""",
-            "MONKEY_RESPATH=\""/netsurf\""",
+            "NETSURF_HOMEPAGE=`"about:blank`"",
+            "NETSURF_UA_FORMAT_STRING=`"LeonOS-NetSurf/%d.%d`"",
+            "NETSURF_BUILTIN_LOG_FILTER=`"`"",
+            "NETSURF_BUILTIN_VERBOSE_FILTER=`"`"",
+            "MONKEY_RESPATH=`"/netsurf`"",
             "_GNU_SOURCE",
             "_DEFAULT_SOURCE",
             "_POSIX_C_SOURCE=200809L",
@@ -5224,7 +5896,7 @@ function Get-LeonOsNetSurfMonkeyConfig {
                 "LEONOS_NETSURF_QUICKJS_CORE",
                 "LEONOS_QUICKJS_NO_ATOMICS",
                 "alloca=__builtin_alloca",
-                "CONFIG_VERSION=\`"$QuickJsVersion\`"",
+                "CONFIG_VERSION=`"$QuickJsVersion`"",
                 "_GNU_SOURCE"
             )
         } elseif (-not $JavaScriptEnabledBuild) { @() } else {

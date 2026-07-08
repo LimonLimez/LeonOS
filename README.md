@@ -23,16 +23,22 @@ process model, a general writable filesystem, or a full browser.
 
 ## Requirements
 
-- Windows PowerShell 5+.
+- Windows PowerShell 5+ or cross-platform PowerShell 7+ (`pwsh`) on Linux/macOS.
 - NASM for building.
 - QEMU for testing.
 
-NASM and QEMU are not vendored in this repo. If they are not installed:
+NASM and QEMU are not vendored in this repo. If they are not installed on
+Windows:
 
 ```powershell
 winget install --id NASM.NASM --exact --accept-source-agreements --accept-package-agreements
 winget install --id SoftwareFreedomConservancy.QEMU --exact --accept-source-agreements --accept-package-agreements
 ```
+
+On Linux, install `nasm`, `qemu-system-x86`, and `clang`/`lld` through the
+system package manager and run the same scripts with `pwsh -File`.
+
+See [docs/TESTING.md](docs/TESTING.md) for the full test matrix and CI notes.
 
 ## Build
 
@@ -394,8 +400,10 @@ Pressing `U` while the FAT32 disk is mounted makes the kernel:
 - `iret` into the entry point at ring 3 with interrupts enabled.
 
 Pressing `G`, or launching **Run UGFX** from Programs, runs the framebuffer
-syscall probe instead. Pressing `C`, or launching **Run C Demo** from Programs,
-runs the freestanding C user app.
+syscall probe instead. Pressing `Ctrl+C`, or launching **Run C Demo** from
+Programs, runs the freestanding C user app (plain `C` is the shell's
+window-close shortcut; the `UWEB`/`USTREAM` probes likewise use `Ctrl+X` and
+`Ctrl+S`).
 
 When the app calls `SYS_EXIT`, the kernel switches back to the saved kernel
 stack, unmaps the user virtual window, frees the physical pages, and continues.

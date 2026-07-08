@@ -6,6 +6,8 @@
 #include "content/backing_store.h"
 #include "desktop/save_pdf.h"
 
+int leonos_netsurf_content_ready_for_script = 1;
+
 static nserror leonos_llcache_initialise(
         const struct llcache_store_parameters *parameters)
 {

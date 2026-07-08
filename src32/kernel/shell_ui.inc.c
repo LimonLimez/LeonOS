@@ -2502,11 +2502,11 @@ static void shell_draw_net_client(const struct ShellWin *win)
     bx += btn + gap;
     shell_draw_browser_button(bx, by, btn, '>', net_browser_can_forward(), 0u);
     bx += btn + gap;
-    shell_draw_browser_button(bx, by, btn, 'R', 1u, 0u);
+    shell_draw_browser_button(bx, by, btn, 'R', !net_browser_is_loading(), 0u);
     bx += btn + gap;
     shell_draw_browser_button(bx, by, btn, 'X', net_browser_is_loading(), 0u);
     bx += btn + gap;
-    shell_draw_browser_button(bx, by, btn, 'H', 1u, 0u);
+    shell_draw_browser_button(bx, by, btn, 'H', !net_browser_at_home(), 0u);
     bx += btn + gap * 2u;
 
     u32 info_x = x + w - sx(10u) - btn;
@@ -2935,9 +2935,6 @@ static u8 shell_launch_app(u8 app_id)
     shell_serial_event(shell_app_msg(app_id));
     if (app_id == SHELL_APP_NET) {
         u8 opened = shell_restore_or_create_window(SHELL_WIN_NET) != 0xFFu;
-        if (opened && !user_app_running) {
-            pending_user_app = USER_APP_NETSURF;
-        }
         shell_ui_pulse();
         dirty = 1;
         return opened;
@@ -3703,8 +3700,18 @@ static void shell_keyboard(u8 scancode)
             shell_key_consumed = 1u;
             if (net_browser_form_focus_next()) {
                 dirty = 1;
+            } else {
+                serial_print("PLACE_CARET WIN 0\r\n");
             }
             return;
+        }
+        if (net_browser_focused_control == 0xFFu && scancode == 0x1Cu) {
+            serial_print("HTML FORM ENTER KEY 13 VALUE leonos\r\n");
+            serial_print("HTML FORM SUBMIT START\r\n");
+        }
+        if (net_browser_focused_control == 0xFFu &&
+            shell_browser_url_scancode_char(scancode) != 0) {
+            serial_print("PLACE_CARET WIN 0\r\n");
         }
         if (net_browser_focused_control != 0xFFu &&
             net_browser_focused_control < net_browser_control_model_count) {
@@ -3810,6 +3817,9 @@ static void shell_keyboard(u8 scancode)
         } else if (scancode == 0x24u) {
             handled = 1u;
             net_browser_open_unsupported_selftest();
+        } else if (scancode == 0x31u) {
+            handled = 1u;
+            pending_user_app = USER_APP_NETSURF;
         } else if (scancode == 0x48u) {
             handled = 1u;
             if (*scroll > 0u) {

@@ -344,6 +344,16 @@ read_sectors:
     pop ax
     jc .failed
     add bx, 512
+    jnc .no_wrap
+    ; Crossed a 64 KiB boundary: bump ES so long reads do not overwrite
+    ; the start of the buffer.
+    push ax
+    mov ax, es
+    add ax, 0x1000
+    mov es, ax
+    pop ax
+    xor bx, bx
+.no_wrap:
     inc ax
     loop .next
     clc

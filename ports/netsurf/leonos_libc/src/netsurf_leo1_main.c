@@ -35,6 +35,9 @@ int leonos_user_main(void)
     static char *argv[] = { arg0, arg1, arg2, 0 };
 
     leonos_write("NETSURF.LEO NetSurf monkey frontend starting\r\n");
+#if LEONOS_NETSURF_DEFAULT_JAVASCRIPT
+    leonos_write("GENERIC JAVASCRIPT OPTION ENABLED\r\n");
+#endif
     leonos_drain_startup_events();
     int rc = main(3, argv);
     leonos_write("NETSURF.LEO NetSurf monkey frontend returned\r\n");

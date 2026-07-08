@@ -115,6 +115,8 @@ try {
     }
 
     Send-LeonOsMonitorLine $Writer $Stream "sendkey f11"
+    $null = Wait-LeonOsSerialLog $SerialLog "LeonOS shell app=net" 90000
+    Send-LeonOsMonitorLine $Writer $Stream "sendkey n"
 
     $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $Loaded = ""

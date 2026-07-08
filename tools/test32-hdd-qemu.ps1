@@ -160,13 +160,19 @@ if ($CombinedOutput -like "*LeonOS 32-bit FAT12 root loaded*") {
     throw "Kernel fell back to FAT12 even though a FAT32 disk was attached."
 }
 
-if ($KeyboardOutput -notlike "*NOTES32.TXT*" -or $KeyboardOutput -notlike "*287*") {
+# Expected sizes come from the files themselves so the test is independent
+# of the platform line endings the repo was checked out with.
+$Root = Split-Path -Parent $PSScriptRoot
+$Notes32Bytes = (Get-Item (Join-Path $Root "fs32/NOTES32.TXT")).Length
+$Hello32Bytes = (Get-Item (Join-Path $Root "fs32/HELLO32.TXT")).Length
+
+if ($KeyboardOutput -notlike "*NOTES32.TXT*" -or $KeyboardOutput -notlike "*bytes=$Notes32Bytes*") {
     throw "Expected keyboard input to open a FAT32 file."
 }
 if ($MouseOutput -notlike "*LeonOS shell ready*") {
     throw "Expected desktop shell ready during the mouse test run."
 }
-if ($MouseOutput -notlike "*HELLO32.TXT*" -or $MouseOutput -notlike "*235*") {
+if ($MouseOutput -notlike "*HELLO32.TXT*" -or $MouseOutput -notlike "*bytes=$Hello32Bytes*") {
     throw "Expected mouse input to open a FAT32 file."
 }
 

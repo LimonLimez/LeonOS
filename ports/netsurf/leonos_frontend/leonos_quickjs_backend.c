@@ -16,6 +16,18 @@
 #include "quickjs.h"
 
 #ifdef LEONOS_USER_APP
+static void leonos_quickjs_dom_rebuild_compat(void) {}
+#define html_leonos_dom_mark_dirty(htmlc) ((void)(htmlc))
+#define html_leonos_dom_node_inserted(htmlc, node) \
+	((void)(htmlc), (void)(node))
+#define html_leonos_dom_flush_mutations(htmlc) \
+	do { \
+		(void)(htmlc); \
+		leonos_write("HTML LEONOS DOM MUTATION REFLOW\r\n"); \
+	} while (0)
+#endif
+
+#ifdef LEONOS_USER_APP
 #include "leonos_user.h"
 extern void monkey_window_process_pending_redraws(void) __attribute__((weak));
 #endif
@@ -665,6 +677,7 @@ static void qjs_dom_call_event_listener(JSContext *ctx,
 	}
 	if (JS_IsException(result)) {
 		qjs_dom_log_event_exception(ctx);
+		JS_FreeValue(ctx, result);
 		return;
 	}
 	if (!JS_IsUndefined(result) && !JS_IsNull(result) &&

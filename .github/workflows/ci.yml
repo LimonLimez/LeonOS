@@ -1,0 +1,48 @@
+name: LeonOS CI
+
+on:
+  push:
+    branches: [main, "cursor/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm qemu-system-x86 clang lld llvm
+
+      - name: Install PowerShell
+        run: |
+          sudo apt-get install -y wget apt-transport-https software-properties-common
+          wget -q "https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/packages-microsoft-prod.deb"
+          sudo dpkg -i packages-microsoft-prod.deb
+          sudo apt-get update
+          sudo apt-get install -y powershell
+
+      - name: Build 16-bit image
+        run: pwsh -File tools/build.ps1
+
+      - name: Build 32-bit image
+        run: pwsh -File tools/build32-image.ps1
+
+      - name: Boot tests
+        run: |
+          pwsh -File tools/test-qemu.ps1
+          pwsh -File tools/test32-qemu.ps1
+
+      - name: Shell and browser selftests
+        run: |
+          pwsh -File tools/build32-hdd.ps1
+          pwsh -File tools/test32-shell-qemu.ps1
+          pwsh -File tools/test32-browser-css-qemu.ps1
+          pwsh -File tools/test32-browser-layout-qemu.ps1
+
+      - name: Visual regression (1080p)
+        run: pwsh -File tools/test32-visual.ps1

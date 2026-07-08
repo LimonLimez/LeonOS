@@ -2,9 +2,11 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 function Get-LeonOsQemu {
-    $Command = Get-Command "qemu-system-i386.exe" -ErrorAction SilentlyContinue
-    if ($Command) {
-        return $Command.Source
+    foreach ($Name in @("qemu-system-i386.exe", "qemu-system-i386")) {
+        $Command = Get-Command $Name -ErrorAction SilentlyContinue
+        if ($Command) {
+            return $Command.Source
+        }
     }
 
     $Candidates = @(

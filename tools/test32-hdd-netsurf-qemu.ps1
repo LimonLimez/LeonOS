@@ -31,7 +31,7 @@ foreach ($ExpectedSerial in $WaitForSerial) {
 $WaitForSerial = $NormalizedWaitForSerial
 
 # Build the real NetSurf-port smoke app, place it on the FAT32 HDD image, boot
-# LeonOS, then press 'm' to launch NETSURF.LEO from ring 3.
+# LeonOS, open the browser, then press 'n' to launch NETSURF.LEO from ring 3.
 if (-not $SkipBuild) {
     & (Join-Path $PSScriptRoot "..\ports\netsurf\build-leonos-probe.ps1") `
         -StartUrl $StartUrl -Interactive | Write-Host
@@ -113,6 +113,9 @@ try {
     }
 
     $Writer.WriteLine("sendkey f11")
+    Wait-QemuMonitorPrompt $Stream 3000
+    $null = Wait-LeonOsSerialLog $SerialLog "LeonOS shell app=net" 90000
+    $Writer.WriteLine("sendkey n")
     Wait-QemuMonitorPrompt $Stream 3000
 
     $SawFetchBytes = $false

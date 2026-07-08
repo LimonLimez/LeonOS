@@ -40,8 +40,10 @@ int leonos_user_main(void)
 
     start = leonos_millis();
     while (ticks < 40u) {
-        leonos_u32 x = 40u + (ticks * 17u) % (fb.width - 80u);
-        leonos_u32 y = 80u + (ticks * 11u) % (fb.height - 160u);
+        leonos_u32 span_x = fb.width > 80u ? fb.width - 80u : 1u;
+        leonos_u32 span_y = fb.height > 160u ? fb.height - 160u : 1u;
+        leonos_u32 x = 40u + (ticks * 17u) % span_x;
+        leonos_u32 y = 80u + (ticks * 11u) % span_y;
         leonos_fb_fill(x, y, 48u, 24u, 0x001A73E8u);
         leonos_yield();
         ticks += 1u;

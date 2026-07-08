@@ -285,6 +285,11 @@ vbe_fail:
     jmp .halt
 
 enable_unreal_mode:
+    ; Make sure A20 is on before any flat access above 1 MiB (the VBE
+    ; linear framebuffer). QEMU/SeaBIOS enables it, real BIOSes may not.
+    in al, 0x92
+    or al, 00000010b
+    out 0x92, al
     cli
     push ds
     mov eax, cs
@@ -1743,6 +1748,13 @@ open_selected_file:
     mov ax, [es:di + 28]
     mov [open_size], ax
     call load_current_file
+    ; Clamp the viewer size to what was actually loaded so a file larger
+    ; than the 8 KiB preview buffer never shows stale buffer contents.
+    mov ax, [loaded_bytes]
+    cmp [open_size], ax
+    jbe .size_ok
+    mov [open_size], ax
+.size_ok:
     mov byte [file_loaded], 1
     mov byte [dirty], 1
     mov si, serial_open
@@ -1825,6 +1837,7 @@ load_current_file:
     jmp .cluster
 
 .done:
+    mov [loaded_bytes], bx
     pop es
     pop dx
     pop cx
@@ -2165,6 +2178,7 @@ dirty db 1
 file_loaded db 0
 current_cluster dw 0
 open_size dw 0
+loaded_bytes dw 0
 content_row db 0
 content_col db 0
 

@@ -77,6 +77,8 @@ struct leonos_fetch_context {
     bool chunk_seen_digit;
     bool chunk_skip_ext;
     uint32_t chunk_remaining;
+    uint8_t chunk_probe[16];
+    size_t chunk_probe_len;
 #endif
     struct leonos_fetch_context *r_next;
     struct leonos_fetch_context *r_prev;
@@ -206,29 +208,44 @@ static void leonos_fetch_decode_chunked_bytes(struct leonos_fetch_context *ctx,
                 if (ch == '\r') {
                     ctx->chunk_state = 1u;
                 } else if (ch == '\n') {
-                    ctx->chunk_state = ctx->chunk_remaining != 0u ? 2u : 5u;
+                    if (ctx->chunk_seen_digit) {
+                        ctx->chunk_state =
+                                ctx->chunk_remaining != 0u ? 2u : 5u;
+                    }
                     ctx->chunk_seen_digit = false;
                     ctx->chunk_skip_ext = false;
                 }
             } else if (leonos_fetch_hex_value(ch, &value)) {
                 ctx->chunk_seen_digit = true;
-                if (ctx->chunk_remaining <= 0x0FFFFFFFu) {
-                    ctx->chunk_remaining =
-                            (ctx->chunk_remaining << 4) | value;
+                if (ctx->chunk_remaining > 0x0FFFFFFFu) {
+                    /* Chunk size is absurdly large: stop decoding instead
+                     * of desyncing on a wrong byte count. */
+                    ctx->chunk_state = 5u;
+                    return;
                 }
+                ctx->chunk_remaining =
+                        (ctx->chunk_remaining << 4) | value;
             } else if (ch == ';') {
                 ctx->chunk_skip_ext = true;
             } else if (ch == '\r') {
                 ctx->chunk_state = 1u;
             } else if (ch == '\n') {
-                ctx->chunk_state = (ctx->chunk_seen_digit &&
-                        ctx->chunk_remaining != 0u) ? 2u : 5u;
+                /* Ignore stray newlines before any size digit rather than
+                 * ending the stream prematurely. */
+                if (ctx->chunk_seen_digit) {
+                    ctx->chunk_state =
+                            ctx->chunk_remaining != 0u ? 2u : 5u;
+                }
                 ctx->chunk_seen_digit = false;
             }
         } else if (ctx->chunk_state == 1u) {
             if (ch == '\n') {
-                ctx->chunk_state = (ctx->chunk_seen_digit &&
-                        ctx->chunk_remaining != 0u) ? 2u : 5u;
+                if (ctx->chunk_seen_digit) {
+                    ctx->chunk_state =
+                            ctx->chunk_remaining != 0u ? 2u : 5u;
+                } else {
+                    ctx->chunk_state = 0u;
+                }
                 ctx->chunk_seen_digit = false;
                 ctx->chunk_skip_ext = false;
             }
@@ -278,23 +295,69 @@ static void leonos_fetch_append_stream_data(struct leonos_fetch_context *ctx,
     }
     if ((ctx->fetch_flags & LEONOS_NET_FETCH_FLAG_CHUNKED) != 0u &&
         !ctx->chunk_decoder_decided) {
-        if (leonos_fetch_data_looks_chunked(data, len, &need_more)) {
+        /* Buffer the stream prefix until chunked framing detection is
+         * conclusive, so a short first read is not misfiled as body. */
+        size_t room = sizeof(ctx->chunk_probe) - ctx->chunk_probe_len;
+        size_t take = len < room ? len : room;
+
+        memcpy(ctx->chunk_probe + ctx->chunk_probe_len, data, take);
+        ctx->chunk_probe_len += take;
+        data += take;
+        len -= take;
+
+        if (leonos_fetch_data_looks_chunked(ctx->chunk_probe,
+                ctx->chunk_probe_len, &need_more)) {
             ctx->chunk_decoder_active = true;
             ctx->chunk_decoder_decided = true;
             leonos_fetch_log("NETSURF LEO HTTPS decode chunked stream\r\n");
-        } else if (!need_more) {
+        } else if (!need_more ||
+                   ctx->chunk_probe_len >= sizeof(ctx->chunk_probe)) {
             ctx->chunk_decoder_decided = true;
         }
+        if (!ctx->chunk_decoder_decided) {
+            return;
+        }
+        if (ctx->chunk_probe_len != 0u) {
+            if (ctx->chunk_decoder_active) {
+                leonos_fetch_decode_chunked_bytes(ctx, ctx->chunk_probe,
+                        ctx->chunk_probe_len);
+            } else {
+                leonos_fetch_append_stream_bytes(ctx, ctx->chunk_probe,
+                        ctx->chunk_probe_len);
+            }
+            ctx->chunk_probe_len = 0u;
+        }
     }
-    if (ctx->chunk_decoder_active) {
-        leonos_fetch_decode_chunked_bytes(ctx, data, len);
-    } else {
-        leonos_fetch_append_stream_bytes(ctx, data, len);
+    if (len != 0u) {
+        if (ctx->chunk_decoder_active) {
+            leonos_fetch_decode_chunked_bytes(ctx, data, len);
+        } else {
+            leonos_fetch_append_stream_bytes(ctx, data, len);
+        }
     }
     if (before == 0u && ctx->data_len != 0u) {
         leonos_fetch_log_sample("NETSURF LEO HTTPS first data ",
                 (const char *) ctx->data, ctx->data_len);
     }
+}
+
+static void leonos_fetch_flush_stream_probe(struct leonos_fetch_context *ctx)
+{
+    if (ctx->chunk_decoder_decided || ctx->chunk_probe_len == 0u) {
+        return;
+    }
+    bool need_more = false;
+    ctx->chunk_decoder_decided = true;
+    if (leonos_fetch_data_looks_chunked(ctx->chunk_probe,
+            ctx->chunk_probe_len, &need_more)) {
+        ctx->chunk_decoder_active = true;
+        leonos_fetch_decode_chunked_bytes(ctx, ctx->chunk_probe,
+                ctx->chunk_probe_len);
+    } else {
+        leonos_fetch_append_stream_bytes(ctx, ctx->chunk_probe,
+                ctx->chunk_probe_len);
+    }
+    ctx->chunk_probe_len = 0u;
 }
 #endif
 
@@ -910,7 +973,7 @@ static void leonos_fetch_send_callback(const fetch_msg *msg,
 static void leonos_fetch_send_header(struct leonos_fetch_context *ctx,
         const char *fmt, ...)
 {
-    char header[96];
+    char header[256];
     fetch_msg msg;
     va_list ap;
     int len;
@@ -919,8 +982,12 @@ static void leonos_fetch_send_header(struct leonos_fetch_context *ctx,
     len = vsnprintf(header, sizeof(header), fmt, ap);
     va_end(ap);
 
-    if (len < 0 || len >= (int) sizeof(header)) {
+    if (len < 0) {
         return;
+    }
+    if (len >= (int) sizeof(header)) {
+        /* Prefer a truncated header over silently dropping it. */
+        len = (int) sizeof(header) - 1;
     }
 
     msg.type = FETCH_HEADER;
@@ -1168,6 +1235,7 @@ static bool leonos_fetch_stream_step(struct leonos_fetch_context *ctx)
         return true;
     }
 
+    leonos_fetch_flush_stream_probe(ctx);
     (void) leonos_fetch_refresh_meta(ctx);
     leonos_fetch_close_stream(ctx);
 
@@ -1497,6 +1565,9 @@ static bool leonos_fetch_process(struct leonos_fetch_context *ctx)
         return false;
     }
     if (!ctx->aborted) {
+        /* Deliver any bytes appended after the last in-loop drain (for
+         * example the flushed chunk-detection probe). */
+        leonos_fetch_send_data_callbacks(ctx);
         leonos_fetch_log("NETSURF LEO HTTPS fetch data callbacks done\r\n");
     }
     leonos_fetch_log_bytes(ctx);

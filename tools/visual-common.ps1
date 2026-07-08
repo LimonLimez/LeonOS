@@ -359,11 +359,9 @@ function Add-LeonOsVisualNativeHelpers {
         return
     }
 
-    Add-Type -ReferencedAssemblies "System.Drawing" -TypeDefinition @"
+    Add-Type -TypeDefinition @"
 using System;
-using System.Drawing;
-using System.Drawing.Imaging;
-using System.Runtime.InteropServices;
+using System.IO;
 
 namespace LeonOsVisual
 {
@@ -424,48 +422,139 @@ namespace LeonOsVisual
                 throw new ArgumentOutOfRangeException("Scaled PNG dimensions must be positive.");
             }
 
-            using (Bitmap bitmap = new Bitmap(outWidth, outHeight, PixelFormat.Format24bppRgb))
+            // Nearest-neighbour scale into filter-prefixed PNG scanlines.
+            int[] sourceXOffsets = new int[outWidth];
+            for (int x = 0; x < outWidth; x++)
             {
-                Rectangle rect = new Rectangle(0, 0, outWidth, outHeight);
-                BitmapData data = bitmap.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
-                try
-                {
-                    if (data.Stride < 0)
-                    {
-                        throw new NotSupportedException("Negative bitmap strides are not supported.");
-                    }
-
-                    int[] sourceXOffsets = new int[outWidth];
-                    for (int x = 0; x < outWidth; x++)
-                    {
-                        sourceXOffsets[x] = ((int)(((long)x * sourceWidth) / outWidth)) * 3;
-                    }
-
-                    byte[] output = new byte[data.Stride * outHeight];
-                    int sourceStride = sourceWidth * 3;
-                    for (int y = 0; y < outHeight; y++)
-                    {
-                        int sourceY = (int)(((long)y * sourceHeight) / outHeight);
-                        int sourceRow = dataOffset + (sourceY * sourceStride);
-                        int dest = y * data.Stride;
-                        for (int x = 0; x < outWidth; x++)
-                        {
-                            int source = sourceRow + sourceXOffsets[x];
-                            output[dest] = ppmBytes[source + 2];
-                            output[dest + 1] = ppmBytes[source + 1];
-                            output[dest + 2] = ppmBytes[source];
-                            dest += 3;
-                        }
-                    }
-
-                    Marshal.Copy(output, 0, data.Scan0, output.Length);
-                }
-                finally
-                {
-                    bitmap.UnlockBits(data);
-                }
-                bitmap.Save(path, ImageFormat.Png);
+                sourceXOffsets[x] = ((int)(((long)x * sourceWidth) / outWidth)) * 3;
             }
+
+            int outStride = 1 + outWidth * 3;
+            byte[] raw = new byte[outStride * outHeight];
+            int sourceStride = sourceWidth * 3;
+            for (int y = 0; y < outHeight; y++)
+            {
+                int sourceY = (int)(((long)y * sourceHeight) / outHeight);
+                int sourceRow = dataOffset + (sourceY * sourceStride);
+                int dest = y * outStride;
+                raw[dest++] = 0; // filter: none
+                for (int x = 0; x < outWidth; x++)
+                {
+                    int source = sourceRow + sourceXOffsets[x];
+                    raw[dest] = ppmBytes[source];
+                    raw[dest + 1] = ppmBytes[source + 1];
+                    raw[dest + 2] = ppmBytes[source + 2];
+                    dest += 3;
+                }
+            }
+
+            // Written as a minimal managed PNG (zlib stored blocks), so no
+            // System.Drawing dependency is needed on any platform.
+            using (FileStream file = new FileStream(path, FileMode.Create, FileAccess.Write))
+            {
+                byte[] signature = { 137, 80, 78, 71, 13, 10, 26, 10 };
+                file.Write(signature, 0, signature.Length);
+
+                byte[] ihdr = new byte[13];
+                WriteBigEndian(ihdr, 0, outWidth);
+                WriteBigEndian(ihdr, 4, outHeight);
+                ihdr[8] = 8;  // bit depth
+                ihdr[9] = 2;  // color type: truecolor
+                WriteChunk(file, "IHDR", ihdr);
+
+                WriteChunk(file, "IDAT", ZlibStore(raw));
+                WriteChunk(file, "IEND", new byte[0]);
+            }
+        }
+
+        private static void WriteBigEndian(byte[] buffer, int offset, int value)
+        {
+            buffer[offset] = (byte)((value >> 24) & 0xFF);
+            buffer[offset + 1] = (byte)((value >> 16) & 0xFF);
+            buffer[offset + 2] = (byte)((value >> 8) & 0xFF);
+            buffer[offset + 3] = (byte)(value & 0xFF);
+        }
+
+        private static void WriteChunk(Stream stream, string type, byte[] data)
+        {
+            byte[] header = new byte[8];
+            WriteBigEndian(header, 0, data.Length);
+            for (int i = 0; i < 4; i++)
+            {
+                header[4 + i] = (byte)type[i];
+            }
+            stream.Write(header, 0, 8);
+            stream.Write(data, 0, data.Length);
+
+            uint crc = Crc32(header, 4, 4, 0xFFFFFFFF);
+            crc = Crc32(data, 0, data.Length, crc) ^ 0xFFFFFFFF;
+            byte[] crcBytes = new byte[4];
+            WriteBigEndian(crcBytes, 0, (int)crc);
+            stream.Write(crcBytes, 0, 4);
+        }
+
+        private static uint[] crcTable;
+
+        private static uint Crc32(byte[] data, int offset, int count, uint crc)
+        {
+            if (crcTable == null)
+            {
+                crcTable = new uint[256];
+                for (uint n = 0; n < 256; n++)
+                {
+                    uint c = n;
+                    for (int k = 0; k < 8; k++)
+                    {
+                        c = (c & 1) != 0 ? 0xEDB88320 ^ (c >> 1) : c >> 1;
+                    }
+                    crcTable[n] = c;
+                }
+            }
+            for (int i = 0; i < count; i++)
+            {
+                crc = crcTable[(crc ^ data[offset + i]) & 0xFF] ^ (crc >> 8);
+            }
+            return crc;
+        }
+
+        private static byte[] ZlibStore(byte[] raw)
+        {
+            const int blockMax = 65535;
+            int blocks = (raw.Length + blockMax - 1) / blockMax;
+            if (blocks == 0)
+            {
+                blocks = 1;
+            }
+            byte[] output = new byte[2 + blocks * 5 + raw.Length + 4];
+            int pos = 0;
+            output[pos++] = 0x78; // zlib header: deflate, 32K window
+            output[pos++] = 0x01;
+
+            int remaining = raw.Length;
+            int source = 0;
+            for (int block = 0; block < blocks; block++)
+            {
+                int len = remaining > blockMax ? blockMax : remaining;
+                output[pos++] = (byte)(block == blocks - 1 ? 1 : 0);
+                output[pos++] = (byte)(len & 0xFF);
+                output[pos++] = (byte)((len >> 8) & 0xFF);
+                output[pos++] = (byte)(~len & 0xFF);
+                output[pos++] = (byte)((~len >> 8) & 0xFF);
+                Array.Copy(raw, source, output, pos, len);
+                pos += len;
+                source += len;
+                remaining -= len;
+            }
+
+            uint a = 1, b = 0;
+            for (int i = 0; i < raw.Length; i++)
+            {
+                a = (a + raw[i]) % 65521;
+                b = (b + a) % 65521;
+            }
+            uint adler = (b << 16) | a;
+            WriteBigEndian(output, pos, (int)adler);
+            return output;
         }
 
         private static void ValidatePpm(byte[] ppmBytes, int dataOffset, int sourceWidth, int sourceHeight)

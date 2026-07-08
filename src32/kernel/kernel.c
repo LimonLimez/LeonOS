@@ -212,7 +212,8 @@ extern u8 __kernel_end;
 #define USER_NET_STREAM_STATE_HAS_DATA 0x00000020u
 #define USER_NET_FETCH_TICK_LIMIT 60000u
 #define USER_NET_STREAM_IDLE_POLL_LIMIT 32u
-#define USER_HEAP_PAGES_DEFAULT 2048u
+#define USER_HEAP_PAGES_DEFAULT 512u
+#define USER_HEAP_PAGES_UQJS 2048u
 #define USER_HEAP_PAGES_NETSURF 49152u
 #define PIT_MS_PER_TICK 10u
 #define USER_APP_NONE 0u
@@ -324,6 +325,7 @@ static u32 fat32_first_data_sector;
 static u32 fat32_root_cluster;
 static u32 fat32_num_fats;
 static u32 fat32_fat_size;
+static u32 fat32_cluster_count;
 static u8 fat32_data_buf[512];
 static u8 fat32_fat_cache[512];
 static u32 fat32_fat_cache_sector;
@@ -921,15 +923,30 @@ static u32 align_up(u32 value, u32 align)
 
 static u8 event_queue_contains_type(u32 type);
 
+static u32 irq_save_disable(void)
+{
+    u32 flags;
+    __asm__ volatile ("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
+    return flags;
+}
+
+static void irq_restore(u32 flags)
+{
+    __asm__ volatile ("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
+}
+
 static void event_push(u32 type, u32 data0, u32 data1)
 {
+    u32 flags = irq_save_disable();
     u32 next = (event_head + 1u) % EVENT_QUEUE_CAPACITY;
     if (type == EVENT_TIMER && event_queue_contains_type(EVENT_TIMER)) {
+        irq_restore(flags);
         return;
     }
     if (next == event_tail) {
         event_dropped += 1;
         if (type != EVENT_KEYBOARD && type != EVENT_MOUSE_BUTTON) {
+            irq_restore(flags);
             return;
         }
         event_tail = (event_tail + 1u) % EVENT_QUEUE_CAPACITY;
@@ -938,11 +955,14 @@ static void event_push(u32 type, u32 data0, u32 data1)
     event_queue[event_head].data0 = data0;
     event_queue[event_head].data1 = data1;
     event_head = next;
+    irq_restore(flags);
 }
 
 static u8 event_pop(struct KernelEvent *out)
 {
+    u32 flags = irq_save_disable();
     if (event_tail == event_head) {
+        irq_restore(flags);
         return 0;
     }
 
@@ -950,6 +970,7 @@ static u8 event_pop(struct KernelEvent *out)
     out->data0 = event_queue[event_tail].data0;
     out->data1 = event_queue[event_tail].data1;
     event_tail = (event_tail + 1u) % EVENT_QUEUE_CAPACITY;
+    irq_restore(flags);
     return 1;
 }
 
@@ -1796,6 +1817,9 @@ static u16 fat_next(u16 cluster)
     const u8 *fat = (const u8 *) g_boot->fat_address;
     u32 offset = cluster + (cluster / 2u);
     u16 value;
+    if (offset + 1u >= g_boot->fat_sectors * 512u) {
+        return 0x0FF7u; /* treat out-of-range clusters as bad */
+    }
     if ((cluster & 1u) == 0) {
         value = (u16) fat[offset] | (((u16) fat[offset + 1u] & 0x0Fu) << 8);
     } else {
@@ -2086,7 +2110,9 @@ static u8 fat32_mount(void)
     u16 reserved = read16(fat32_data_buf + 0x0Eu);
     u8 num_fats = fat32_data_buf[0x10u];
     u16 root_entries16 = read16(fat32_data_buf + 0x11u);
+    u16 total_sectors16 = read16(fat32_data_buf + 0x13u);
     u16 fat_size16 = read16(fat32_data_buf + 0x16u);
+    u32 total_sectors32 = read32(fat32_data_buf + 0x20u);
     u32 fat_size32 = read32(fat32_data_buf + 0x24u);
     u32 root_cluster = read32(fat32_data_buf + 0x2Cu);
 
@@ -2097,12 +2123,19 @@ static u8 fat32_mount(void)
         return 0;
     }
 
+    u32 total_sectors = total_sectors32 != 0 ? total_sectors32 : (u32) total_sectors16;
+    u32 meta_sectors = (u32) reserved + (u32) num_fats * fat_size32;
+    if (total_sectors <= meta_sectors) {
+        return 0;
+    }
+
     fat32_partition_lba = part_lba;
     fat32_sectors_per_cluster = sectors_per_cluster;
     fat32_num_fats = num_fats;
     fat32_fat_size = fat_size32;
     fat32_first_fat_sector = part_lba + reserved;
-    fat32_first_data_sector = part_lba + reserved + (u32) num_fats * fat_size32;
+    fat32_first_data_sector = part_lba + meta_sectors;
+    fat32_cluster_count = (total_sectors - meta_sectors) / sectors_per_cluster;
     fat32_root_cluster = root_cluster;
     fat32_fat_cache_sector = 0xFFFFFFFFu;
     fat32_present = 1;
@@ -2186,7 +2219,12 @@ static void open_selected_file_fat32(void)
     }
 
     file_buffer_size = copied;
-    file_loaded = 1;
+    file_loaded = (copied != 0u || entry->size == 0u) ? 1u : 0u;
+    if (!file_loaded) {
+        serial_print("LeonOS 32-bit FAT32 file open failed\r\n");
+        dirty = 1;
+        return;
+    }
     copy_name(open_name, entry->name);
     serial_print("LeonOS 32-bit FAT32 file opened ");
     serial_print(open_name);
@@ -2223,8 +2261,14 @@ static u8 fat32_set_fat_entry(u32 cluster, u32 value)
 
 static u32 fat32_alloc_cluster(void)
 {
-    u32 max_clusters = fat32_fat_size * 128u;
-    for (u32 cluster = 3u; cluster < max_clusters; cluster += 1) {
+    /* Valid data clusters are 2 .. fat32_cluster_count + 1; also cap by the
+     * number of entries that actually fit in the FAT table. */
+    u32 max_cluster = fat32_cluster_count + 2u;
+    u32 fat_entries = fat32_fat_size * 128u;
+    if (max_cluster > fat_entries) {
+        max_cluster = fat_entries;
+    }
+    for (u32 cluster = 3u; cluster < max_cluster; cluster += 1) {
         if (fat32_next_cluster(cluster) == 0) {
             return cluster;
         }
@@ -3541,11 +3585,12 @@ static void leo_run_user_app(const char raw_name[11], const char *display_name)
     u32 image_total = image_size + bss_size;
     u32 code_pages = align_up(image_total, PAGE_SIZE) / PAGE_SIZE;
     u8 is_netsurf = text_eq(display_name, "NETSURF.LEO");
+    u8 is_uqjs = text_eq(display_name, "UQJS.LEO");
     u32 stack_pages = is_netsurf ? USER_STACK_PAGES_NETSURF :
             USER_STACK_PAGES_DEFAULT;
     u32 stack_guard_pages = is_netsurf ? USER_STACK_GUARD_PAGES_NETSURF : 0u;
     u32 heap_pages = is_netsurf ? USER_HEAP_PAGES_NETSURF :
-            USER_HEAP_PAGES_DEFAULT;
+            (is_uqjs ? USER_HEAP_PAGES_UQJS : USER_HEAP_PAGES_DEFAULT);
     if (code_pages + stack_guard_pages + stack_pages + heap_pages >
             USER_VIRT_PAGES) {
         if (code_pages + stack_guard_pages + stack_pages >= USER_VIRT_PAGES) {
@@ -4088,6 +4133,8 @@ static u8 net_browser_resource_fetch_done;
 static u8 net_browser_resource_fetch_body_seen;
 static u16 net_browser_resource_fetch_bytes;
 static u32 net_browser_resource_fetch_start_tick;
+static u8 net_browser_resource_active_slot;
+static u8 net_browser_resource_done[NET_BROWSER_RESOURCE_MAX];
 static char net_browser_resource_fetch_status[4] = "---";
 static char net_browser_resource_fetch_phase[5] = "IDLE";
 static u16 net_browser_navigation_count;
@@ -4167,6 +4214,8 @@ static char net_browser_current_control_name[NET_BROWSER_CONTROL_NAME_MAX];
 static char net_browser_current_control_actual[NET_BROWSER_CONTROL_VALUE_MAX];
 static char net_browser_current_form_action[NET_BROWSER_RESOURCE_URL_MAX];
 static char net_browser_current_form_method[8];
+static char net_browser_current_link_href[NET_BROWSER_RESOURCE_URL_MAX];
+static char net_browser_current_link_rel[48];
 static u8 net_browser_css_in_style;
 static u8 net_browser_css_summary_added;
 static u8 net_browser_css_token_len;
@@ -4666,6 +4715,9 @@ static const char *net_browser_first_same_host_resource_path(void);
 static u8 net_browser_first_same_host_resource_slot(void);
 static void net_browser_image_prepare_resource_fetch(void);
 static void net_browser_image_decode_current_resource(void);
+static void net_browser_image_reset_resource_body(void);
+static void net_browser_css_feed(u8 ch);
+static void net_browser_css_finish_token(void);
 static void net_browser_image_finalize_direct_document(void);
 
 static void net_browser_set_resource_phase(const char *phase)
@@ -4781,6 +4833,9 @@ static void __attribute__((unused)) net_send_http_resource_get(void)
     if (rslot != 0xFFu && net_browser_resource_type[rslot] == 'I') {
         len = net_append_capped(request, len, sizeof(request),
             "image/png,image/jpeg,*/*");
+    } else if (rslot != 0xFFu && net_browser_resource_type[rslot] == 'C') {
+        len = net_append_capped(request, len, sizeof(request),
+            "text/css,*/*");
     } else {
         len = net_append_capped(request, len, sizeof(request), "text/html");
     }
@@ -5102,6 +5157,9 @@ static const char *net_browser_first_same_host_resource_path(void)
         return active;
     }
     for (u32 r = 0u; r < net_browser_resource_count; r += 1u) {
+        if (net_browser_resource_done[r]) {
+            continue;
+        }
         const char *path = net_browser_same_host_path(net_browser_resource_url[r]);
         if (path != 0) {
             return path;
@@ -5148,7 +5206,8 @@ static void net_browser_finish_resource_fetch(void)
         net_browser_resource_fetch_done) {
         return;
     }
-    net_browser_resource_fetch_done = 1u;
+    u8 slot = net_browser_resource_active_slot;
+    char rtype = (slot != 0xFFu) ? net_browser_resource_type[slot] : 0;
     if (net_browser_resource_fetch_status[0] == '-') {
         net_browser_resource_fetch_status[0] = 'E';
         net_browser_resource_fetch_status[1] = 'O';
@@ -5158,18 +5217,42 @@ static void net_browser_finish_resource_fetch(void)
         serial_print(net_browser_resource_fetch_status);
         serial_print("\r\n");
     }
-    if (net_browser_resource_fetch_status[0] != 'T') {
-        net_browser_set_resource_phase("DONE");
-    }
     if (net_browser_resource_fetch_status[0] == '2') {
-        net_browser_image_decode_current_resource();
+        if (rtype == 'I') {
+            net_browser_image_decode_current_resource();
+        } else if (rtype == 'C') {
+            for (u32 i = 0u; i < net_browser_resource_body_len; i += 1u) {
+                net_browser_css_feed(net_browser_resource_body[i]);
+            }
+            net_browser_css_finish_token();
+            serial_print("LeonOS net browser CSS external parsed bytes ");
+            serial_print_dec(net_browser_resource_body_len);
+            serial_print(" stored ");
+            serial_print_dec(net_browser_css_stored_rule_count);
+            serial_print("\r\n");
+            dirty = 1u;
+        }
     }
     serial_print(msg_net_browser_resource_done_prefix);
     serial_print(net_browser_resource_fetch_status);
     serial_print(" bytes ");
     serial_print_dec(net_browser_resource_fetch_bytes);
     serial_print("\r\n");
+    if (slot != 0xFFu) {
+        net_browser_resource_done[slot] = 1u;
+    }
+    net_browser_resource_fetch_started = 0u;
+    net_browser_resource_active_slot = 0xFFu;
+    net_browser_image_reset_resource_body();
     net_set_last("RESOURCE FETCH DONE");
+    if (net_browser_first_same_host_resource_path() != 0) {
+        net_browser_resource_fetch_done = 0u;
+        net_browser_resource_fetch_pending = 1u;
+        net_browser_set_resource_phase("PEND");
+    } else {
+        net_browser_resource_fetch_done = 1u;
+        net_browser_set_resource_phase("DONE");
+    }
 }
 
 static void net_browser_timeout_resource_fetch(void)
@@ -6070,9 +6153,15 @@ static void net_browser_text_reset(void)
     net_browser_current_control_actual[0] = 0;
     net_browser_current_form_action[0] = 0;
     net_browser_current_form_method[0] = 0;
+    net_browser_current_link_href[0] = 0;
+    net_browser_current_link_rel[0] = 0;
     net_browser_last_form_submit_url[0] = 0;
     net_browser_resource_total = 0u;
     net_browser_resource_count = 0u;
+    net_browser_resource_active_slot = 0xFFu;
+    for (u32 r = 0u; r < NET_BROWSER_RESOURCE_MAX; r += 1u) {
+        net_browser_resource_done[r] = 0u;
+    }
     net_browser_resource_fetch_pending = 0u;
     net_browser_resource_fetch_started = 0u;
     net_browser_resource_fetch_done = 0u;
@@ -8779,6 +8868,13 @@ static u8 net_browser_is_loading(void)
            (net_browser_resource_fetch_started && !net_browser_resource_fetch_done);
 }
 
+static u8 net_browser_at_home(void)
+{
+    return net_text_is(net_browser_current_url, net_browser_default_url) ||
+           net_text_starts_with_ci(net_browser_current_url,
+                                   "https://www.google.com/?igu=1");
+}
+
 static void net_browser_history_save_scroll(void)
 {
     if (net_browser_history_count != 0u &&
@@ -9584,6 +9680,7 @@ static void net_browser_focus_control(u8 control)
     serial_print(" value ");
     serial_print(net_browser_control_value_store[control]);
     serial_print("\r\n");
+    serial_print("PLACE_CARET WIN 0\r\n");
 }
 
 static u8 net_browser_form_focus_next(void)
@@ -9758,7 +9855,10 @@ static u8 net_browser_form_submit_control(u8 control)
             net_browser_form_append_pair(url, &pos, sizeof(url), &first, (u8) i);
         }
     }
-    if (net_browser_form_is_google_search(form)) {
+    if (net_browser_form_is_google_search(form) &&
+        !net_text_contains_ci(url, "gbv=")) {
+        /* Basic-HTML compatibility pair; skip when the form's own hidden
+         * gbv field already made it into the query string. */
         net_browser_form_append_raw_pair(url, &pos, sizeof(url),
                                          &first, "gbv", "1");
     }
@@ -9772,6 +9872,10 @@ static u8 net_browser_form_submit_control(u8 control)
     }
     net_append_capped(net_browser_last_form_submit_url, 0u,
                       sizeof(net_browser_last_form_submit_url), url);
+    serial_print("HTML FORM ENTER KEY 13 VALUE ");
+    serial_print(net_browser_control_value_store[control]);
+    serial_print("\r\n");
+    serial_print("HTML FORM SUBMIT START\r\n");
     serial_print("LeonOS net browser form submit ");
     serial_print_dec(control);
     serial_print(" url ");
@@ -9806,6 +9910,7 @@ static u8 net_browser_form_insert_char(char ch)
         net_browser_form_edit_count += 1u;
     }
     net_browser_update_control_render(control);
+    serial_print("PLACE_CARET WIN 0\r\n");
     serial_print("LeonOS net browser form edit ");
     serial_print_dec(control);
     serial_print(" value ");
@@ -10108,8 +10213,13 @@ static void net_browser_attr_commit(void)
         }
         if (net_tag_is("a")) {
             net_browser_store_current_link_target();
+            net_browser_queue_resource('H');
+        } else if (net_tag_is("link")) {
+            net_copy_attr_value(net_browser_current_link_href,
+                                sizeof(net_browser_current_link_href));
+        } else {
+            net_browser_queue_resource('H');
         }
-        net_browser_queue_resource('H');
     } else if (net_text_is(net_browser_html_attr_name, "src")) {
         net_browser_src_count += 1u;
         if (net_browser_first_src[0] == 0) {
@@ -10163,6 +10273,10 @@ static void net_browser_attr_commit(void)
     } else if (net_text_is(net_browser_html_attr_name, "rel")) {
         if (net_browser_first_rel[0] == 0) {
             net_copy_attr_value(net_browser_first_rel, sizeof(net_browser_first_rel));
+        }
+        if (net_tag_is("link")) {
+            net_copy_attr_value(net_browser_current_link_rel,
+                                sizeof(net_browser_current_link_rel));
         }
     } else if (net_text_is(net_browser_html_attr_name, "class")) {
         net_copy_attr_value(net_browser_current_class,
@@ -10427,6 +10541,14 @@ static void net_browser_finish_tag(void)
     }
     net_browser_attr_commit();
     net_browser_count_tag();
+    if (net_tag_is("link") && net_browser_current_link_href[0] != 0 &&
+        net_text_contains_ci(net_browser_current_link_rel, "stylesheet")) {
+        net_browser_queue_resource_value('C', net_browser_current_link_href);
+    }
+    if (net_tag_is("link")) {
+        net_browser_current_link_href[0] = 0;
+        net_browser_current_link_rel[0] = 0;
+    }
     if (net_browser_html_tag[0] == '/') {
         if (net_tag_is("/form")) {
             net_browser_form_close_current();
@@ -10825,6 +10947,8 @@ static void net_browser_html_feed(const u8 *html, u32 len)
             net_browser_current_control_actual[0] = 0;
             net_browser_current_form_action[0] = 0;
             net_browser_current_form_method[0] = 0;
+            net_browser_current_link_href[0] = 0;
+            net_browser_current_link_rel[0] = 0;
             net_browser_attr_reset_current();
             continue;
         }
@@ -12607,7 +12731,21 @@ static void rtl8139_poll_rx(u32 budget)
         u16 status = rtl8139_rx_read16(offset);
         u16 length = rtl8139_rx_read16((u16) (offset + 2u));
         u32 frame_len = 0u;
-        if ((status & 0x0001u) != 0u && length >= 4u && length <= NET_FRAME_MAX + 4u) {
+        if (length == 0xFFF0u) {
+            /* DMA of the current frame is still in progress. */
+            break;
+        }
+        if (length < 4u || length > NET_FRAME_MAX + 4u) {
+            /* Corrupt descriptor: resync the RX ring instead of advancing
+             * by a garbage length and desyncing every later frame. */
+            outb((u16) (rtl8139_io_base + RTL_REG_CR), 0x08u);
+            outb((u16) (rtl8139_io_base + RTL_REG_CR), 0x0Cu);
+            rtl8139_rx_cur = 0u;
+            outw((u16) (rtl8139_io_base + RTL_REG_CAPR), 0xFFF0u);
+            outw((u16) (rtl8139_io_base + RTL_REG_ISR), 0x0005u);
+            break;
+        }
+        if ((status & 0x0001u) != 0u) {
             frame_len = (u32) length - 4u;
             for (u32 i = 0; i < frame_len; i += 1u) {
                 net_rx_frame[i] = rtl8139_rx_read8((u16) (offset + 4u + i));
@@ -13787,6 +13925,23 @@ static void handle_keyboard(void)
         event_push(EVENT_KEYBOARD, 0x40u, 0);
         return;
     }
+    if (keyboard_ctrl_down && !user_overlay_input) {
+        /* Ctrl-modified developer hotkeys for user apps whose plain letters
+         * are taken by shell window-management shortcuts (C close, X
+         * maximize, S start menu). */
+        if (scancode == 0x2Eu) {
+            pending_user_app = USER_APP_UCDEMO;
+            return;
+        }
+        if (scancode == 0x2Du) {
+            pending_user_app = USER_APP_UWEB;
+            return;
+        }
+        if (scancode == 0x1Fu) {
+            pending_user_app = USER_APP_USTREAM;
+            return;
+        }
+    }
     event_push(EVENT_KEYBOARD, scancode, 0);
     if (user_overlay_input) {
         return;
@@ -13813,16 +13968,10 @@ static void handle_keyboard(void)
         pending_user_app = USER_APP_UHELLO;
     } else if (scancode == 0x22u) {
         pending_user_app = USER_APP_UGFX;
-    } else if (scancode == 0x2Eu) {
-        pending_user_app = USER_APP_UCDEMO;
     } else if (scancode == 0x30u) {
         pending_user_app = USER_APP_UBROWSER;
     } else if (scancode == 0x31u) {
         pending_user_app = USER_APP_UNETRUN;
-    } else if (scancode == 0x2Du) {
-        pending_user_app = USER_APP_UWEB;
-    } else if (scancode == 0x1Fu) {
-        pending_user_app = USER_APP_USTREAM;
     } else if (scancode == 0x24u) {
         pending_user_app = USER_APP_UQJS;
     } else if (scancode == 0x01u) {
@@ -13910,6 +14059,12 @@ static void validate_bootinfo(const struct LeonBootInfo *boot_info)
         boot_info->root_address == 0 ||
         boot_info->data_cache_address == 0) {
         panic("missing FAT12 preload buffers");
+    }
+    if (boot_info->root_entries == 0 ||
+        boot_info->root_entries > LEONOS_ROOT_ENTRIES ||
+        boot_info->fat_sectors == 0 ||
+        boot_info->data_cache_sectors == 0) {
+        panic("invalid FAT12 preload geometry");
     }
 }
 
