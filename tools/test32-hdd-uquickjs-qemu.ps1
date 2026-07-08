@@ -18,6 +18,11 @@ $ImagePath = Get-LeonOsImagePath $Image
 $HddPath = Get-LeonOsImagePath $HddImage
 $EscapedImagePath = $ImagePath -replace '"', '\"'
 $EscapedHddPath = $HddPath -replace '"', '\"'
+$SerialLog = Get-LeonOsSerialLogPath "LeonOS-UQuickJS-Test"
+if (Test-Path -LiteralPath $SerialLog) {
+    Remove-Item -LiteralPath $SerialLog -Force
+}
+$SerialArg = Get-LeonOsQemuSerialFileArg $SerialLog
 
 $Listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
 $Listener.Start()
@@ -26,13 +31,11 @@ $Listener.Stop()
 
 $StartInfo = [System.Diagnostics.ProcessStartInfo]::new()
 $StartInfo.FileName = $Qemu
-$StartInfo.Arguments = "-name LeonOS-UQuickJS-Test -machine pc -cpu qemu32 -m 64M -drive file=`"$EscapedImagePath`",format=raw,if=floppy -drive file=`"$EscapedHddPath`",format=raw,if=ide,index=0,media=disk -boot a -serial stdio -display none -monitor tcp:127.0.0.1:$MonitorPort,server,nowait -no-reboot"
+$StartInfo.Arguments = "-name LeonOS-UQuickJS-Test -machine pc -cpu qemu32 -m 64M -drive file=`"$EscapedImagePath`",format=raw,if=floppy -drive file=`"$EscapedHddPath`",format=raw,if=ide,index=0,media=disk -boot a -serial $SerialArg -display none -monitor tcp:127.0.0.1:$MonitorPort,server,nowait -no-reboot"
 $StartInfo.UseShellExecute = $false
-$StartInfo.RedirectStandardOutput = $true
 $StartInfo.RedirectStandardError = $true
 
 $Process = [System.Diagnostics.Process]::Start($StartInfo)
-$Output = [System.Text.StringBuilder]::new()
 $Client = $null
 
 try {
@@ -54,35 +57,12 @@ try {
 
     # Wait for the desktop shell before injecting the hotkey so a slow boot
     # cannot swallow it.
-    $BootDeadline = [DateTime]::UtcNow.AddSeconds(60)
-    while ([DateTime]::UtcNow -lt $BootDeadline -and -not $Process.HasExited) {
-        $Line = $Process.StandardOutput.ReadLine()
-        if ($null -eq $Line) {
-            break
-        }
-        [void] $Output.AppendLine($Line)
-        if ($Line.Contains("LeonOS shell ready")) {
-            break
-        }
-    }
+    $null = Wait-LeonOsSerialLog $SerialLog "LeonOS shell ready" 60000
     Start-Sleep -Seconds 1
     $Writer.WriteLine("sendkey j")
-
-    $SawOk = $false
-    $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    while ([DateTime]::UtcNow -lt $Deadline -and -not $Process.HasExited) {
-        $Line = $Process.StandardOutput.ReadLine()
-        if ($null -eq $Line) {
-            break
-        }
-        [void] $Output.AppendLine($Line)
-        if ($Line.Contains("UQJS OK modern JavaScript core")) {
-            $SawOk = $true
-        }
-        if ($SawOk -and $Line.Contains("LeonOS user app returned to kernel")) {
-            break
-        }
-    }
+    Wait-QemuMonitorPrompt $Stream 3000
+    $null = Wait-LeonOsSerialLog $SerialLog "UQJS OK modern JavaScript core" ($TimeoutSeconds * 1000)
+    $null = Wait-LeonOsSerialLog $SerialLog "LeonOS user app returned to kernel" 15000
 
     $Writer.WriteLine("quit")
     $Writer.Dispose()
@@ -95,11 +75,11 @@ try {
         $Process.WaitForExit()
     }
 
-    [void] $Output.Append($Process.StandardOutput.ReadToEnd())
-    $Text = $Output.ToString()
+    $Text = Read-LeonOsSerialLog $SerialLog
     $Stderr = $Process.StandardError.ReadToEnd()
     Write-Host "QEMU serial output (LeonOS-UQuickJS-Test):"
     Write-Host $Text
+    Write-Host "Serial log: $SerialLog"
     if ($Stderr.Trim().Length -gt 0) {
         Write-Host "QEMU stderr:"
         Write-Host $Stderr
