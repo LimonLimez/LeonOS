@@ -255,6 +255,7 @@ static volatile u8 pending_user_browser_open;
 static volatile u8 user_app_running;
 static volatile u8 user_app_netsurf_running;
 static volatile u8 user_fb_overlay_active;
+static volatile u8 user_input_suppress_until_mouse_release;
 static char pending_user_browser_url[USER_BROWSER_URL_MAX];
 static char user_url_copy[USER_BROWSER_URL_MAX];
 static u8 net_user_fetch_active;
@@ -922,6 +923,12 @@ static u32 align_up(u32 value, u32 align)
 }
 
 static u8 event_queue_contains_type(u32 type);
+
+static u8 user_app_owns_input(void)
+{
+    return user_app_running &&
+        (user_fb_overlay_active || user_app_netsurf_running);
+}
 
 static u32 irq_save_disable(void)
 {
@@ -3694,6 +3701,8 @@ static void leo_run_user_app(const char raw_name[11], const char *display_name)
     user_event_poll_reported = 0u;
     user_app_running = 1;
     user_app_netsurf_running = is_netsurf;
+    user_input_suppress_until_mouse_release =
+        (mouse_buttons != 0u || prev_mouse_buttons != 0u) ? 1u : 0u;
 
     u32 entry_addr = USER_VIRT_BASE + entry_offset;
     u32 user_esp = user_stack_limit - 16u; /* leave a little headroom, 16-aligned */
@@ -3734,6 +3743,7 @@ static void leo_run_user_app(const char raw_name[11], const char *display_name)
     user_app_running = 0;
     user_app_netsurf_running = 0u;
     user_fb_overlay_active = 0u;
+    user_input_suppress_until_mouse_release = 0u;
     dirty = 1;
 }
 
@@ -13700,8 +13710,8 @@ static void user_event_map_netsurf(struct KernelEvent *event)
     u32 raw_y = event->type == EVENT_MOUSE_BUTTON
         ? (event->data1 & 0xFFFFu)
         : event->data1;
-    u32 out_x = client_w + 1024u;
-    u32 out_y = client_h + 1024u;
+    u32 out_x = 0u;
+    u32 out_y = 0u;
     if (raw_x >= (u32) client_x && raw_y >= (u32) client_y &&
         raw_x < (u32) client_x + client_w &&
         raw_y < (u32) client_y + client_h) {
@@ -13776,8 +13786,18 @@ static void handle_mouse_packet(void)
         mouse_y = max_y;
     }
 
-    u8 user_overlay_input = user_app_running && user_fb_overlay_active;
+    u8 user_overlay_input = user_app_owns_input();
     u8 event_prev_buttons = prev_mouse_buttons;
+    if (user_overlay_input && user_input_suppress_until_mouse_release) {
+        if (mouse_buttons == 0u) {
+            user_input_suppress_until_mouse_release = 0u;
+        }
+        prev_mouse_buttons = mouse_buttons;
+        if (!dirty) {
+            draw_cursor_overlay();
+        }
+        return;
+    }
     if (!user_overlay_input) {
         shell_mouse_move();
         shell_mouse_click();
@@ -13901,7 +13921,7 @@ static void draw_cursor_overlay(void)
 static void handle_keyboard(void)
 {
     u8 scancode = inb(0x60u);
-    u8 user_overlay_input = user_app_running && user_fb_overlay_active;
+    u8 user_overlay_input = user_app_owns_input();
     if (scancode == 0x1Du || scancode == 0x9Du) {
         keyboard_ctrl_down = (scancode == 0x1Du);
         if (!user_overlay_input) {
@@ -13990,7 +14010,7 @@ void isr_dispatch(const struct InterruptFrame *frame)
     if (frame->vector >= 32u && frame->vector <= 47u) {
         if (frame->vector == 32u) {
             system_ticks += 1;
-            if (!(user_app_running && user_fb_overlay_active)) {
+            if (!user_app_owns_input()) {
                 event_push(EVENT_TIMER, system_ticks, 0);
             }
         } else if (frame->vector == 33u) {
@@ -14070,7 +14090,7 @@ static void validate_bootinfo(const struct LeonBootInfo *boot_info)
 
 static void task_events(struct KernelTask *task)
 {
-    if (user_app_running && user_fb_overlay_active) {
+    if (user_app_owns_input()) {
         return;
     }
     struct KernelEvent event;
@@ -14086,7 +14106,7 @@ static void task_events(struct KernelTask *task)
 static void task_desktop(struct KernelTask *task)
 {
     (void) task;
-    if (user_app_running && user_fb_overlay_active) {
+    if (user_app_owns_input()) {
         return;
     }
     if (!dirty) {

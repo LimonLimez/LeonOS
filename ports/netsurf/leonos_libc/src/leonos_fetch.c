@@ -17,9 +17,13 @@
 
 #ifdef LEONOS_USER_APP
 #include "leonos_user.h"
+extern int leonos_netsurf_pump_events(void);
 int leonos_netsurf_fetch_finished_for_script;
 int leonos_netsurf_active_fetches_for_script;
 unsigned int leonos_netsurf_fetch_generation_for_script;
+#define LEONOS_FETCH_PUMP_EVENTS() leonos_netsurf_pump_events()
+#else
+#define LEONOS_FETCH_PUMP_EVENTS() 0
 #endif
 
 #define LEONOS_FETCH_MAX_BYTES (8u * 1024u * 1024u)
@@ -1163,6 +1167,9 @@ static bool leonos_fetch_stream_step(struct leonos_fetch_context *ctx)
          step < LEONOS_FETCH_STREAM_POLL_BUDGET && !ctx->aborted;
          step += 1u) {
         bool made_progress = false;
+        if (LEONOS_FETCH_PUMP_EVENTS()) {
+            break;
+        }
         ctx->stream_state = leonos_net_stream_poll(ctx->stream_handle);
         ctx->stream_polls += 1u;
 
@@ -1522,6 +1529,7 @@ static bool leonos_fetch_process(struct leonos_fetch_context *ctx)
             }
             if (ctx->open_retries < LEONOS_FETCH_OPEN_RETRY_BUDGET) {
                 ctx->open_retries += 1u;
+                (void) LEONOS_FETCH_PUMP_EVENTS();
                 (void) leonos_yield();
                 return false;
             }
@@ -1768,6 +1776,9 @@ static void leonos_fetch_poll(lwc_string *scheme)
             }
         } else {
             RING_INSERT(save_ring, ctx);
+            if (LEONOS_FETCH_PUMP_EVENTS()) {
+                break;
+            }
         }
     }
 

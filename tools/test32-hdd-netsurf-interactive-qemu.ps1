@@ -116,7 +116,6 @@ try {
 
     Send-LeonOsMonitorLine $Writer $Stream "sendkey f11"
     $null = Wait-LeonOsSerialLog $SerialLog "LeonOS shell app=net" 90000
-    Send-LeonOsMonitorLine $Writer $Stream "sendkey n"
 
     $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $Loaded = ""
@@ -192,7 +191,8 @@ try {
     $Stdout = Read-LeonOsSerialLog $SerialLog
     foreach ($Bad in @(
         "NetSurf abort", "DIE ", "CPU exception", "PANIC",
-        "user syscall bad ptr", "user app bad", "user app no memory")) {
+        "user syscall bad ptr", "user app bad", "user app no memory",
+        "WINDOW TRACK ARGS BAD")) {
         if ($Stdout -like "*$Bad*") {
             throw "Interactive NetSurf run emitted failure marker: $Bad"
         }

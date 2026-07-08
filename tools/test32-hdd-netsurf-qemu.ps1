@@ -31,7 +31,8 @@ foreach ($ExpectedSerial in $WaitForSerial) {
 $WaitForSerial = $NormalizedWaitForSerial
 
 # Build the real NetSurf-port smoke app, place it on the FAT32 HDD image, boot
-# LeonOS, open the browser, then press 'n' to launch NETSURF.LEO from ring 3.
+# LeonOS, then open Browser. When NETSURF.LEO is present the shell launches
+# the real NetSurf app directly from that user-facing Browser path.
 if (-not $SkipBuild) {
     & (Join-Path $PSScriptRoot "..\ports\netsurf\build-leonos-probe.ps1") `
         -StartUrl $StartUrl -Interactive | Write-Host
@@ -115,8 +116,6 @@ try {
     $Writer.WriteLine("sendkey f11")
     Wait-QemuMonitorPrompt $Stream 3000
     $null = Wait-LeonOsSerialLog $SerialLog "LeonOS shell app=net" 90000
-    $Writer.WriteLine("sendkey n")
-    Wait-QemuMonitorPrompt $Stream 3000
 
     $SawFetchBytes = $false
     $SawFetchFinished = $false
@@ -282,6 +281,7 @@ try {
         "NETSURF LEO HTTPS reduced real body excerpt",
         "NETSURF LEO HTTPS kept real body without unsupported head",
         "NETSURF LEO HTTPS strip unsupported",
+        "WINDOW TRACK ARGS BAD",
         "user page range bad", "user syscall bad ptr", "user syscall bad number",
         "NetSurf abort", "DIE ", "CPU exception", "PANIC")) {
         if ($Stdout -like "*$Bad*") {

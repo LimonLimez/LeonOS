@@ -98,7 +98,6 @@ try {
     $null = Wait-LeonOsSerialLog $SerialLog "LeonOS cooperative scheduler OK" 90000
     Send-MonitorCommand $Writer $Stream "sendkey f11"
     $null = Wait-LeonOsSerialLog $SerialLog "LeonOS shell app=net" 90000
-    Send-MonitorCommand $Writer $Stream "sendkey n"
 
     $LoadedText = Wait-LeonOsSerialLog `
         $SerialLog "HTML REDRAW TEXT Google Search" ($TimeoutSeconds * 1000)
@@ -113,11 +112,16 @@ try {
         -FromX $InitialMouse.X -FromY $InitialMouse.Y
     Start-Sleep -Milliseconds 200
     Send-MonitorCommand $Writer $Stream "mouse_button 0x01"
-    Start-Sleep -Milliseconds 80
+    Start-Sleep -Milliseconds 220
+    Move-QemuMouseTo $Writer 775 494 -Step 1 -FromX 774 -FromY 494
+    Start-Sleep -Milliseconds 120
     Send-MonitorCommand $Writer $Stream "mouse_button 0"
+    Start-Sleep -Milliseconds 120
+    Move-QemuMouseTo $Writer 774 494 -Step 1 -FromX 775 -FromY 494
 
     $null = Wait-SerialAfter `
-        $SerialLog "LEONOS_EVENT CLICK WIN 0" $InputStartLength 10000
+        $SerialLog "COMMAND CLICK PROOF LEONOS_EVENT CLICK WIN 0" `
+        $InputStartLength 10000
 
     Send-MonitorCommand $Writer $Stream "quit"
     $Writer.Dispose()
@@ -151,7 +155,8 @@ foreach ($Bad in @(
     "user app not found", "user app bad", "user app read failed",
     "LeonOS user heap exhausted", "NetSurf abort", "DIE ",
     "CPU exception", "PANIC", "NETSURF QUICKJS EXCEPTION",
-    "NETSURF QUICKJS EVENT EXCEPTION")) {
+    "NETSURF QUICKJS EVENT EXCEPTION", "WINDOW TRACK ARGS BAD",
+    "WINDOW CLICK ARGS BAD", "WINDOW BUTTON BAD", "WINDOW KIND BAD")) {
     if ($Output -like "*$Bad*") {
         throw "NetSurf input test hit failure: $Bad"
     }
